@@ -6,7 +6,11 @@ jobs:
     steps:
       - run: |
           sudo apt-get update
-          sudo apt-get install -y gfortran meson ninja-build git liblapack-dev libblas-dev
+          sudo apt-get install -y gfortran meson ninja-build git libopenblas-dev
+          find /usr/lib -name 'libopenblas*.a'
+          OB=$(find /usr/lib -name 'libopenblas*.a' | head -n 1)
+          sudo ln -sf "$OB" /usr/lib/aarch64-linux-gnu/libblas.a
+          sudo ln -sf "$OB" /usr/lib/aarch64-linux-gnu/liblapack.a
           git clone --depth 1 --branch v6.7.1 https://github.com/grimme-lab/xtb.git
           cd xtb
           export FFLAGS="-fallow-argument-mismatch"
