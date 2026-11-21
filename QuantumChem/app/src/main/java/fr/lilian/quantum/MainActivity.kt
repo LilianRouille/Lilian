@@ -215,7 +215,9 @@ fun xtbJob(ctx: android.content.Context, args: List<String>, xyz: String): Tripl
     val pb = ProcessBuilder(listOf(exe.absolutePath, "mol.xyz") + args).directory(dir).redirectErrorStream(true)
     pb.environment()["GLIBC_TUNABLES"] = "glibc.pthread.rseq=0"
     pb.environment()["OMP_STACKSIZE"] = "256M"
-    pb.environment()["OMP_NUM_THREADS"] = Runtime.getRuntime().availableProcessors().toString()
+    pb.environment()["OMP_NUM_THREADS"] = "1"
+    pb.environment()["OPENBLAS_NUM_THREADS"] = "1"
+    pb.environment()["GOTO_NUM_THREADS"] = "1"
     pb.environment()["HOME"] = dir.absolutePath
     return try {
         val pr = pb.start()
@@ -240,7 +242,9 @@ fun runXtb(ctx: android.content.Context, args: List<String>, xyz: String): Strin
     val pb = ProcessBuilder(listOf(exe.absolutePath, "mol.xyz") + args).directory(dir).redirectErrorStream(true)
     pb.environment()["GLIBC_TUNABLES"] = "glibc.pthread.rseq=0"
     pb.environment()["OMP_STACKSIZE"] = "256M"
-    pb.environment()["OMP_NUM_THREADS"] = Runtime.getRuntime().availableProcessors().toString()
+    pb.environment()["OMP_NUM_THREADS"] = "1"
+    pb.environment()["OPENBLAS_NUM_THREADS"] = "1"
+    pb.environment()["GOTO_NUM_THREADS"] = "1"
     pb.environment()["HOME"] = dir.absolutePath
     return try {
         val p = pb.start()
@@ -378,7 +382,7 @@ fun App() {
                 commit(nm)
                 msg = t("Optimisation xtb terminée (E = ", "xtb optimization done (E = ") + e + " Eh)"
                 calcLog = "Optimisation de géométrie – xtb 6.7.1, GFN2-xTB, phase gaz (pas de solvant ALPB), charge 0 – commande : xtb mol.xyz --gfn 2 --opt – énergie : " + e + " Eh\nxyz d'entrée :\n" + toXyz(snap)
-            } else msg = "xtb : exit=" + r.first + " " + r.second.lines().filter { it.isNotBlank() }.takeLast(2).joinToString(" | ")
+            } else msg = (if (r.first == 159) "xtb bloqué par Android (appel système interdit) – " else "") + "xtb : exit=" + r.first + " " + r.second.lines().filter { it.isNotBlank() }.takeLast(2).joinToString(" | ")
         }
     }
     fun finishBond(sa: Int, p: Offset) {
