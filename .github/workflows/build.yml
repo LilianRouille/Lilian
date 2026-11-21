@@ -27,10 +27,15 @@ jobs:
             cmake --build lapack/b -j4 >> lp.log 2>&1 || { tail -30 lp.log; exit 1; }
             cmake --install lapack/b --prefix $HOME/lp >> lp.log 2>&1 || { tail -30 lp.log; exit 1; }
           fi
-          LP=$(dirname "$(find $HOME/lp -name libblas.a | head -n 1)")
-          echo "LP=$LP"; ls $LP $LP/pkgconfig
-          export PKG_CONFIG_PATH=$LP/pkgconfig
-          for n in blas lapack; do sudo ln -sf $LP/lib$n.a /usr/lib/aarch64-linux-gnu/lib$n.a; done
+          echo "=== FICHIERS LAPACK ==="; find $HOME/lp -name '*.a' -o -name '*.pc'
+          BL=$(find $HOME/lp -name '*blas*.a' | head -n 1)
+          LA=$(find $HOME/lp -name '*lapack*.a' | grep -v lapacke | head -n 1)
+          PC=$(dirname "$(find $HOME/lp -name lapack.pc | head -n 1)")
+          echo "BLAS=$BL LAPACK=$LA PC=$PC"
+          test -n "$BL" && test -n "$LA"
+          export PKG_CONFIG_PATH=$PC
+          sudo ln -sf "$BL" /usr/lib/aarch64-linux-gnu/libblas.a
+          sudo ln -sf "$LA" /usr/lib/aarch64-linux-gnu/liblapack.a
           git clone --depth 1 --branch v6.7.1 https://github.com/grimme-lab/xtb.git
           cd xtb
           export FFLAGS="-fallow-argument-mismatch"
