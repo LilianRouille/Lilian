@@ -254,6 +254,40 @@ fun runXtb(ctx: android.content.Context, args: List<String>, xyz: String): Strin
     } catch (e: Exception) { "Erreur: " + e.message }
 }
 
+fun runLib(ctx: android.content.Context, lib: String, args: List<String>, env: Map<String, String> = emptyMap()): Pair<Int, String> {
+    val exe = File(ctx.applicationInfo.nativeLibraryDir, lib)
+    if (!exe.exists()) return Pair(-1, "absent")
+    return try {
+        val pb = ProcessBuilder(listOf(exe.absolutePath) + args).redirectErrorStream(true)
+        pb.environment().putAll(env)
+        val pr = pb.start()
+        val out = pr.inputStream.bufferedReader().readText()
+        Pair(pr.waitFor(), out.trim())
+    } catch (e: Exception) { Pair(-2, e.message ?: "?") }
+}
+
+fun diag(ctx: android.content.Context): String {
+    val sb = StringBuilder()
+    sb.append("Android " + android.os.Build.VERSION.RELEASE + " (API " + android.os.Build.VERSION.SDK_INT + ")\n")
+    val tun = mapOf("GLIBC_TUNABLES" to "glibc.pthread.rseq=0")
+    val h = runLib(ctx, "libhello.so", emptyList(), tun)
+    sb.append("hello glibc : exit=" + h.first + " " + h.second + "\n")
+    val h2 = runLib(ctx, "libhello.so", emptyList())
+    sb.append("hello sans tunable : exit=" + h2.first + "\n")
+    val list = listOf("set_tid_address" to 96, "set_robust_list" to 99, "futex" to 98, "rt_sigaction" to 134,
+        "prlimit64" to 261, "readlinkat" to 78, "getrandom" to 278, "brk" to 214, "mmap" to 222, "munmap" to 215,
+        "mprotect" to 226, "openat" to 56, "close" to 57, "read" to 63, "lseek" to 62, "ioctl" to 29, "fstat" to 80,
+        "newfstatat" to 79, "faccessat" to 48, "getrusage" to 165, "sched_getaffinity" to 123, "rseq" to 293,
+        "clone3" to 435, "statx" to 291, "faccessat2" to 439, "mbind(temoin)" to 235)
+    for ((n, nr) in list) {
+        val r = runLib(ctx, "libsysprobe.so", listOf(nr.toString()))
+        sb.append(n + " : " + (if (r.first == 159) "BLOQUE" else if (r.first == 94) "ok" else "exit " + r.first) + "\n")
+    }
+    val x = runLib(ctx, "libxtb.so", listOf("--version"), tun)
+    sb.append("xtb --version : exit=" + x.first + "\n")
+    return sb.toString()
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -618,6 +652,10 @@ fun App() {
                             }
                         }
                     }) { Text(t("Tester xtb (eau)", "Test xtb (water)")) }
+                    Button(onClick = {
+                        xtbOut = t("Diagnostic en cours…", "Running diagnostic…")
+                        scope.launch { xtbOut = withContext(Dispatchers.IO) { diag(ctx) } }
+                    }) { Text(t("Diagnostic Android", "Android diagnostic")) }
                     if (xtbOut.isNotEmpty()) Text(xtbOut, fontSize = 10.sp)
                 }
             })

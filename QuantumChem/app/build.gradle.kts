@@ -19,7 +19,7 @@ android {
         targetCompatibility = JavaVersion.VERSION_17
     }
     kotlinOptions { jvmTarget = "17" }
-    packaging { jniLibs { useLegacyPackaging = true; keepDebugSymbols += "**/libxtb.so" } }
+    packaging { jniLibs { useLegacyPackaging = true; keepDebugSymbols += "**/*.so" } }
 }
 dependencies {
     implementation(platform("androidx.compose:compose-bom:2024.06.00"))
