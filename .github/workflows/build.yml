@@ -10,35 +10,22 @@ jobs:
         id: c
         with:
           path: xtb-bin
-          key: xtb-6.7.1-musl-v1
+          key: xtb-6.7.1-arm64-v1
       - if: steps.c.outputs.cache-hit != 'true'
         run: |
-          mkdir -p xtb-bin
-          cat > build-xtb.sh <<'EOS'
-          set -x
-          apk add --no-cache build-base gfortran meson git linux-headers perl openblas-dev
-          apk add --no-cache samurai || apk add --no-cache ninja
-          for p in openblas-static lapack-static blas-static; do apk add --no-cache $p || true; done
-          OB=$(find / -name 'libopenblas*.a' 2>/dev/null | head -n 1)
-          if [ -z "$OB" ]; then
-            git clone --depth 1 --branch v0.3.27 https://github.com/OpenMathLib/OpenBLAS.git /tmp/ob
-            cd /tmp/ob
-            make -j4 TARGET=ARMV8 USE_THREAD=0 NO_SHARED=1 FC=gfortran > /tmp/ob.log 2>&1 || { tail -30 /tmp/ob.log; exit 1; }
-            make PREFIX=/usr/local NO_SHARED=1 install > /dev/null 2>&1
-            OB=/usr/local/lib/libopenblas.a
-            cd /w
-          fi
-          echo "OpenBLAS: $OB"
-          ln -sf "$OB" /usr/lib/libblas.a
-          ln -sf "$OB" /usr/lib/liblapack.a
-          ln -sf "$OB" /usr/lib/libopenblas.a
+          sudo apt-get update
+          sudo apt-get install -y gfortran meson ninja-build git libopenblas-dev
+          OB=$(find /usr/lib -name 'libopenblas*.a' | head -n 1)
+          sudo ln -sf "$OB" /usr/lib/aarch64-linux-gnu/libblas.a
+          sudo ln -sf "$OB" /usr/lib/aarch64-linux-gnu/liblapack.a
+          sudo ln -sf "$OB" /usr/lib/aarch64-linux-gnu/libopenblas.a
           git clone --depth 1 --branch v6.7.1 https://github.com/grimme-lab/xtb.git
           cd xtb
           export FFLAGS="-fallow-argument-mismatch"
           A="--buildtype=release --default-library=static -Dprefer_static=true -Dfortran_link_args=-static -Dc_link_args=-static"
-          meson setup build $A -Dopenmp=false \
-            || meson setup build --wipe $A \
+          meson setup build $A \
             || meson setup build --wipe $A -Dlapack=openblas \
+            || meson setup build --wipe $A -Dlapack=custom -Dcustom_libraries=openblas \
             || { echo "=== ECHEC CONFIGURATION ==="; tail -30 build/meson-logs/meson-log.txt; exit 1; }
           for d in subprojects/*/; do
             n=$(basename "$d")
@@ -49,9 +36,8 @@ jobs:
           grep -n -A6 "FAILED:" ninja.log | cut -c1-300 | head -60
           test -f build/xtb
           strip build/xtb || true
-          cp build/xtb /w/xtb-bin/libxtb.so
-          EOS
-          docker run --rm -v "$PWD":/w -w /w alpine:3.20 sh /w/build-xtb.sh
+          mkdir -p ../xtb-bin
+          cp build/xtb ../xtb-bin/libxtb.so
       - uses: actions/upload-artifact@v4
         with:
           name: xtb-bin
