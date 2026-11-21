@@ -266,6 +266,36 @@ fun runLib(ctx: android.content.Context, lib: String, args: List<String>, env: M
     } catch (e: Exception) { Pair(-2, e.message ?: "?") }
 }
 
+fun entryInfo(ctx: android.content.Context, lib: String): String {
+    val f = File(ctx.applicationInfo.nativeLibraryDir, lib)
+    if (!f.exists()) return "absent"
+    return try {
+        java.io.RandomAccessFile(f, "r").use { r ->
+            val le = java.nio.ByteOrder.LITTLE_ENDIAN
+            val h = ByteArray(64); r.readFully(h)
+            val bb = java.nio.ByteBuffer.wrap(h).order(le)
+            val entry = bb.getLong(24)
+            val phoff = bb.getLong(32)
+            val phsz = bb.getShort(54).toInt()
+            val phnum = bb.getShort(56).toInt()
+            var off = -1L
+            for (i in 0 until phnum) {
+                r.seek(phoff + i.toLong() * phsz)
+                val q = ByteArray(56); r.readFully(q)
+                val pb = java.nio.ByteBuffer.wrap(q).order(le)
+                val type = pb.getInt(0); val poff = pb.getLong(8); val vaddr = pb.getLong(16); val fsz = pb.getLong(32)
+                if (type == 1 && entry >= vaddr && entry < vaddr + fsz) { off = poff + (entry - vaddr); break }
+            }
+            if (off < 0) "entrée introuvable" else {
+                r.seek(off)
+                val w = ByteArray(4); r.readFully(w)
+                val word = java.nio.ByteBuffer.wrap(w).order(le).getInt(0).toLong() and 0xFFFFFFFFL
+                "entrée=0x" + entry.toString(16) + " mot=0x" + word.toString(16) + (if (word == 0xD100C3FFL) " -> STUB PRESENT" else " -> pas de stub")
+            }
+        }
+    } catch (e: Exception) { "erreur " + e.message }
+}
+
 fun diag(ctx: android.content.Context): String {
     val sb = StringBuilder()
     sb.append("Android " + android.os.Build.VERSION.RELEASE + " (API " + android.os.Build.VERSION.SDK_INT + ")\n")
@@ -274,6 +304,8 @@ fun diag(ctx: android.content.Context): String {
     sb.append("hello glibc : exit=" + h.first + " " + h.second + "\n")
     val h2 = runLib(ctx, "libhello.so", emptyList())
     sb.append("hello sans tunable : exit=" + h2.first + "\n")
+    sb.append("hello " + entryInfo(ctx, "libhello.so") + "\n")
+    sb.append("xtb " + entryInfo(ctx, "libxtb.so") + "\n")
     val list = listOf("set_tid_address" to 96, "set_robust_list" to 99, "futex" to 98, "rt_sigaction" to 134,
         "prlimit64" to 261, "readlinkat" to 78, "getrandom" to 278, "brk" to 214, "mmap" to 222, "munmap" to 215,
         "mprotect" to 226, "openat" to 56, "close" to 57, "read" to 63, "lseek" to 62, "ioctl" to 29, "fstat" to 80,
