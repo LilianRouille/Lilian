@@ -7,7 +7,6 @@ jobs:
       - run: |
           sudo apt-get update
           sudo apt-get install -y gfortran meson ninja-build git libopenblas-dev
-          find /usr/lib -name 'libopenblas*.a'
           OB=$(find /usr/lib -name 'libopenblas*.a' | head -n 1)
           sudo ln -sf "$OB" /usr/lib/aarch64-linux-gnu/libblas.a
           sudo ln -sf "$OB" /usr/lib/aarch64-linux-gnu/liblapack.a
@@ -15,16 +14,15 @@ jobs:
           git clone --depth 1 --branch v6.7.1 https://github.com/grimme-lab/xtb.git
           cd xtb
           export FFLAGS="-fallow-argument-mismatch"
-          echo "=== OPTIONS ==="; grep -n "option(" meson_options.txt
-          echo "=== LIBS ==="; ls -l /usr/lib/aarch64-linux-gnu/libblas* /usr/lib/aarch64-linux-gnu/liblapack* /usr/lib/aarch64-linux-gnu/libopenblas*
           A="--buildtype=release --default-library=static -Dprefer_static=true -Dfortran_link_args=-static -Dc_link_args=-static"
-          meson setup build $A \
-            || meson setup build --wipe $A -Dlapack=openblas \
-            || meson setup build --wipe $A -Dlapack=custom -Dcustom_libraries=openblas \
-            || { echo "=== ECHEC CONFIGURATION ==="; exit 1; }
-          ninja -C build 2>&1 | tee ninja.log || true
+          meson setup build $A || { echo "=== ECHEC CONFIGURATION ==="; tail -40 build/meson-logs/meson-log.txt; exit 1; }
+          for d in subprojects/*/; do
+            n=$(basename "$d")
+            if [ -f "$d/meson.build" ]; then meson configure build -D$n:default_library=static || true; fi
+          done
+          ninja -C build -k 0 2>&1 | tee ninja.log || true
           echo "=========== ERREURS ==========="
-          grep -n -B3 -A12 -E "FAILED:|Error:|ld:" ninja.log | head -60
+          grep -n -A6 "FAILED:" ninja.log | cut -c1-300 | head -60
           ls -l build/xtb
       - uses: actions/upload-artifact@v4
         with:
