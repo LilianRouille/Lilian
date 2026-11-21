@@ -63,18 +63,6 @@ jobs:
         with:
           path: ~/lp
           key: lapack-3.12.0-v1
-      - name: Test appels systeme
-        run: |
-          sudo apt-get install -y strace
-          printf '3\n\nO 0.0 0.0 0.0\nH 0.96 0.0 0.0\nH -0.24 0.93 0.0\n' > water.xyz
-          chmod +x xtb-bin/libxtb.so
-          export GLIBC_TUNABLES=glibc.pthread.rseq=0 OMP_NUM_THREADS=1
-          strace -f -o st.log ./xtb-bin/libxtb.so water.xyz --gfn 2 --opt > out.log 2>&1 || true
-          grep -E "TOTAL ENERGY|normal termination" out.log | head -3
-          echo "=== MBIND ==="; grep -c mbind st.log || true
-          echo "=== SYSCALLS ==="
-          sed -E 's/^[0-9]+ +//' st.log | sed -E 's/\(.*//' | sort | uniq -c | sort -rn | awk '{printf "%s ", $2}'
-          echo
       - uses: actions/upload-artifact@v4
         with:
           name: xtb-bin
@@ -92,11 +80,46 @@ jobs:
         with:
           name: xtb-bin
           path: xtb-bin
+      - name: Sondes
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-aarch64-linux-gnu
+          cat > probe.c <<'EOF'
+          typedef long L;
+          static L sc(L n, L a, L b, L c, L d, L e) {
+            register L x8 __asm__("x8") = n;
+            register L x0 __asm__("x0") = a;
+            register L x1 __asm__("x1") = b;
+            register L x2 __asm__("x2") = c;
+            register L x3 __asm__("x3") = d;
+            register L x4 __asm__("x4") = e;
+            __asm__ volatile("svc 0" : "+r"(x0) : "r"(x8), "r"(x1), "r"(x2), "r"(x3), "r"(x4) : "memory");
+            return x0;
+          }
+          void cmain(L *sp) {
+            L argc = sp[0];
+            char **argv = (char **)(sp + 1);
+            L n = 0;
+            if (argc > 1) { for (char *p = argv[1]; *p; p++) n = n * 10 + (*p - '0'); }
+            if (n) sc(n, 0, 0, 0, 0, 0);
+            sc(64, 1, (L)"ok\n", 3, 0, 0);
+            sc(94, 0, 0, 0, 0, 0);
+            for (;;) {}
+          }
+          __asm__(".global _start\n_start:\n mov x0, sp\n bl cmain\n");
+          EOF
+          cat > hello.c <<'EOF'
+          #include <stdio.h>
+          int main(void) { puts("hello"); return 0; }
+          EOF
+          aarch64-linux-gnu-gcc -static -nostdlib -fno-stack-protector -O1 -o libsysprobe.so probe.c
+          aarch64-linux-gnu-gcc -static -O1 -o libhello.so hello.c
+          ls -l libsysprobe.so libhello.so
       - name: Compiler
         run: |
           d=$(dirname "$(find . -name settings.gradle.kts | head -n 1)")
           mkdir -p "$d/app/src/main/jniLibs/arm64-v8a"
-          cp xtb-bin/libxtb.so "$d/app/src/main/jniLibs/arm64-v8a/libxtb.so"
+          cp xtb-bin/libxtb.so libsysprobe.so libhello.so "$d/app/src/main/jniLibs/arm64-v8a/"
           cd "$d"
           gradle assembleDebug
       - uses: actions/upload-artifact@v4
@@ -104,3 +127,4 @@ jobs:
           name: Adylase-apk
           path: "**/*.apk"
           if-no-files-found: error
+          
