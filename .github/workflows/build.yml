@@ -115,6 +115,27 @@ jobs:
           aarch64-linux-gnu-gcc -static -nostdlib -fno-stack-protector -O1 -o libsysprobe.so probe.c
           aarch64-linux-gnu-gcc -static -O1 -o libhello.so hello.c
           ls -l libsysprobe.so libhello.so
+      - name: Patch set_robust_list
+        run: |
+          cat > patch.py <<'EOF'
+          import struct
+          def patch(path):
+              d = bytearray(open(path, 'rb').read())
+              n = 0
+              for i in range(0, len(d) - 16, 4):
+                  w = struct.unpack_from('<I', d, i)[0]
+                  if w in (0x52800C68, 0xD2800C68):
+                      for j in range(1, 4):
+                          if struct.unpack_from('<I', d, i + 4 * j)[0] == 0xD4000001:
+                              struct.pack_into('<I', d, i, (w & ~(0xFFFF << 5)) | (124 << 5))
+                              n += 1
+                              break
+              open(path, 'wb').write(d)
+              print(path, 'patched', n)
+          patch('xtb-bin/libxtb.so')
+          patch('libhello.so')
+          EOF
+          python3 patch.py
       - name: Compiler
         run: |
           d=$(dirname "$(find . -name settings.gradle.kts | head -n 1)")
@@ -127,4 +148,3 @@ jobs:
           name: Adylase-apk
           path: "**/*.apk"
           if-no-files-found: error
-          
