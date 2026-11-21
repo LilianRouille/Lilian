@@ -10,16 +10,24 @@ jobs:
         id: c
         with:
           path: xtb-bin
-          key: xtb-6.7.1-arm64-v2
+          key: xtb-6.7.1-arm64-v3
+      - uses: actions/cache/restore@v4
+        id: obc
+        if: steps.c.outputs.cache-hit != 'true'
+        with:
+          path: ~/ob
+          key: openblas-0.3.27-noaff-v1
       - if: steps.c.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gfortran meson ninja-build git
-          git clone --depth 1 --branch v0.3.27 https://github.com/OpenMathLib/OpenBLAS.git
-          cd OpenBLAS
-          make -j4 TARGET=ARMV8 USE_THREAD=0 USE_OPENMP=0 NO_AFFINITY=1 NO_SHARED=1 NO_LAPACKE=1 FC=gfortran > ../ob.log 2>&1 || { tail -30 ../ob.log; exit 1; }
-          make PREFIX=$HOME/ob NO_SHARED=1 install > ../ob-install.log 2>&1 || { tail -30 ../ob-install.log; exit 1; }
-          cd ..
+          sudo apt-get install -y gfortran meson ninja-build git strace
+          if [ ! -d "$HOME/ob/lib" ]; then
+            git clone --depth 1 --branch v0.3.27 https://github.com/OpenMathLib/OpenBLAS.git
+            cd OpenBLAS
+            make -j4 TARGET=ARMV8 USE_THREAD=0 USE_OPENMP=0 NO_AFFINITY=1 NO_SHARED=1 NO_LAPACKE=1 FC=gfortran > ../ob.log 2>&1 || { tail -30 ../ob.log; exit 1; }
+            make PREFIX=$HOME/ob NO_SHARED=1 install > ../ob-install.log 2>&1 || { tail -30 ../ob-install.log; exit 1; }
+            cd ..
+          fi
           for n in blas lapack; do cp $HOME/ob/lib/pkgconfig/openblas.pc $HOME/ob/lib/pkgconfig/$n.pc; done
           export PKG_CONFIG_PATH=$HOME/ob/lib/pkgconfig
           for n in libblas.a liblapack.a libopenblas.a; do sudo ln -sf $HOME/ob/lib/libopenblas.a /usr/lib/aarch64-linux-gnu/$n; done
@@ -27,22 +35,33 @@ jobs:
           cd xtb
           export FFLAGS="-fallow-argument-mismatch"
           A="--buildtype=release --default-library=static -Dprefer_static=true -Dfortran_link_args=-static -Dc_link_args=-static"
-          meson setup build $A \
-            || meson setup build --wipe $A -Dlapack=openblas \
-            || meson setup build --wipe $A -Dlapack=custom -Dcustom_libraries=openblas \
+          meson setup build $A -Dopenmp=false \
+            || { rm -rf build; meson setup build $A; } \
+            || { rm -rf build; meson setup build $A -Dlapack=openblas; } \
+            || { rm -rf build; meson setup build $A -Dlapack=custom -Dcustom_libraries=openblas; } \
             || { echo "=== ECHEC CONFIGURATION ==="; tail -30 build/meson-logs/meson-log.txt; exit 1; }
           for d in subprojects/*/; do
             n=$(basename "$d")
-            if [ -f "$d/meson.build" ]; then meson configure build -D$n:default_library=static || true; fi
+            if [ -f "$d/meson.build" ]; then
+              meson configure build -D$n:default_library=static -D$n:openmp=false \
+                || meson configure build -D$n:default_library=static || true
+            fi
           done
           ninja -C build -k 0 2>&1 | tee ninja.log || true
           echo "=========== ERREURS ==========="
           grep -n -A6 "FAILED:" ninja.log | cut -c1-300 | head -60
           test -f build/xtb
-          echo "=== NM ==="; nm build/xtb 2>/dev/null | grep -i mbind | head -5 || true
+          printf '3\n\nO 0.0 0.0 0.0\nH 0.96 0.0 0.0\nH -0.24 0.93 0.0\n' > w0.xyz
+          echo "=== QUI APPELLE MBIND ==="
+          GLIBC_TUNABLES=glibc.pthread.rseq=0 OMP_NUM_THREADS=1 strace -f -k -e trace=mbind ./build/xtb w0.xyz --gfn 2 --opt 2>&1 | grep -B2 -A14 "mbind(" | head -40 || true
           strip build/xtb || true
           mkdir -p ../xtb-bin
           cp build/xtb ../xtb-bin/libxtb.so
+      - uses: actions/cache/save@v4
+        if: always() && steps.obc.outputs.cache-hit != 'true'
+        with:
+          path: ~/ob
+          key: openblas-0.3.27-noaff-v1
       - name: Test appels systeme
         run: |
           sudo apt-get install -y strace
