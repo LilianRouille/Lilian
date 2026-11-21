@@ -9,8 +9,11 @@ jobs:
           sudo apt-get install -y gfortran meson ninja-build git liblapack-dev libblas-dev
           git clone --depth 1 --branch v6.7.1 https://github.com/grimme-lab/xtb.git
           cd xtb
+          export FFLAGS="-fallow-argument-mismatch"
           meson setup build --buildtype=release -Dfortran_link_args=-static -Dc_link_args=-static || { tail -40 build/meson-logs/meson-log.txt; exit 1; }
-          ninja -C build
+          ninja -C build 2>&1 | tee ninja.log || true
+          echo "=========== ERREURS ==========="
+          grep -n -B3 -A12 -E "FAILED:|Error:" ninja.log | head -80
           ls -l build/xtb
       - uses: actions/upload-artifact@v4
         with:
