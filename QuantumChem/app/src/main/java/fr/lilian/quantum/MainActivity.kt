@@ -38,6 +38,11 @@ import kotlin.math.cos
 import kotlin.math.sin
 import kotlin.math.sqrt
 import kotlinx.coroutines.delay
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.withContext
+import androidx.compose.ui.platform.LocalContext
+import java.io.File
 
 const val U = 40f
 typealias V = Triple<Float, Float, Float>
@@ -179,6 +184,24 @@ fun segD(p: Offset, a: Offset, b: Offset): Float {
     return (p - (a + ab * t)).getDistance()
 }
 
+fun runXtb(ctx: android.content.Context, args: List<String>, xyz: String): String {
+    val exe = File(ctx.applicationInfo.nativeLibraryDir, "libxtb.so")
+    if (!exe.exists()) return "xtb absent de l'APK / xtb missing from the APK"
+    val dir = File(ctx.cacheDir, "xtb").apply { mkdirs() }
+    File(dir, "mol.xyz").writeText(xyz)
+    val pb = ProcessBuilder(listOf(exe.absolutePath, "mol.xyz") + args).directory(dir).redirectErrorStream(true)
+    pb.environment()["GLIBC_TUNABLES"] = "glibc.pthread.rseq=0"
+    pb.environment()["OMP_STACKSIZE"] = "256M"
+    pb.environment()["OMP_NUM_THREADS"] = Runtime.getRuntime().availableProcessors().toString()
+    pb.environment()["HOME"] = dir.absolutePath
+    return try {
+        val p = pb.start()
+        val out = p.inputStream.bufferedReader().readText()
+        val c = p.waitFor()
+        "exit=" + c + "\n" + out.lines().takeLast(25).joinToString("\n")
+    } catch (e: Exception) { "Erreur: " + e.message }
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -240,6 +263,9 @@ fun App() {
     var autoH by remember { mutableStateOf(true) }
     var dragFrom by remember { mutableStateOf<Int?>(null) }
     var dragPos by remember { mutableStateOf(Offset.Zero) }
+    var xtbOut by remember { mutableStateOf("") }
+    val scope = rememberCoroutineScope()
+    val ctx = LocalContext.current
 
     LaunchedEffect(shape) { while (shape) { mol = relax(mol, 2); delay(33) } }
 
@@ -491,6 +517,16 @@ fun App() {
                     Text(t("Application entièrement programmée par Claude (Anthropic), sur la demande de Lilian Rouillé.", "App entirely programmed by Claude (Anthropic), at the request of Lilian Rouillé."))
                     Spacer(Modifier.height(10.dp))
                     Text(t("Calculs : xtb (GFN2-xTB) et Open Babel, à venir.", "Calculations: xtb (GFN2-xTB) and Open Babel, coming."))
+                    Spacer(Modifier.height(10.dp))
+                    Button(onClick = {
+                        xtbOut = t("Calcul en cours…", "Running…")
+                        scope.launch {
+                            xtbOut = withContext(Dispatchers.IO) {
+                                runXtb(ctx, listOf("--gfn", "2", "--opt"), "3\n\nO 0.0 0.0 0.0\nH 0.96 0.0 0.0\nH -0.24 0.93 0.0\n")
+                            }
+                        }
+                    }) { Text(t("Tester xtb (eau)", "Test xtb (water)")) }
+                    if (xtbOut.isNotEmpty()) Text(xtbOut, fontSize = 10.sp)
                 }
             })
     }
