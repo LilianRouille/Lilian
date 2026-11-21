@@ -10,64 +10,56 @@ jobs:
         id: c
         with:
           path: xtb-bin
-          key: xtb-6.7.1-arm64-v3
+          key: xtb-6.7.1-arm64-v4
       - uses: actions/cache/restore@v4
-        id: obc
+        id: lpc
         if: steps.c.outputs.cache-hit != 'true'
         with:
-          path: ~/ob
-          key: openblas-0.3.27-noaff-v1
+          path: ~/lp
+          key: lapack-3.12.0-v1
       - if: steps.c.outputs.cache-hit != 'true'
         run: |
           sudo apt-get update
-          sudo apt-get install -y gfortran meson ninja-build git strace
-          if [ ! -d "$HOME/ob/lib" ]; then
-            git clone --depth 1 --branch v0.3.27 https://github.com/OpenMathLib/OpenBLAS.git
-            cd OpenBLAS
-            make -j4 TARGET=ARMV8 USE_THREAD=0 USE_OPENMP=0 NO_AFFINITY=1 NO_SHARED=1 NO_LAPACKE=1 FC=gfortran > ../ob.log 2>&1 || { tail -30 ../ob.log; exit 1; }
-            make PREFIX=$HOME/ob NO_SHARED=1 install > ../ob-install.log 2>&1 || { tail -30 ../ob-install.log; exit 1; }
-            cd ..
+          sudo apt-get install -y gfortran meson ninja-build git cmake
+          if [ ! -d "$HOME/lp" ]; then
+            git clone --depth 1 --branch v3.12.0 https://github.com/Reference-LAPACK/lapack.git
+            cmake -S lapack -B lapack/b -DCMAKE_BUILD_TYPE=Release -DBUILD_SHARED_LIBS=OFF -DBUILD_TESTING=OFF -DLAPACKE=OFF -DCBLAS=OFF -DCMAKE_POSITION_INDEPENDENT_CODE=ON -DCMAKE_Fortran_COMPILER=gfortran > lp.log 2>&1 || { tail -30 lp.log; exit 1; }
+            cmake --build lapack/b -j4 >> lp.log 2>&1 || { tail -30 lp.log; exit 1; }
+            cmake --install lapack/b --prefix $HOME/lp >> lp.log 2>&1 || { tail -30 lp.log; exit 1; }
           fi
-          for n in blas lapack; do cp $HOME/ob/lib/pkgconfig/openblas.pc $HOME/ob/lib/pkgconfig/$n.pc; done
-          export PKG_CONFIG_PATH=$HOME/ob/lib/pkgconfig
-          for n in libblas.a liblapack.a libopenblas.a; do sudo ln -sf $HOME/ob/lib/libopenblas.a /usr/lib/aarch64-linux-gnu/$n; done
+          LP=$(dirname "$(find $HOME/lp -name libblas.a | head -n 1)")
+          echo "LP=$LP"; ls $LP $LP/pkgconfig
+          export PKG_CONFIG_PATH=$LP/pkgconfig
+          for n in blas lapack; do sudo ln -sf $LP/lib$n.a /usr/lib/aarch64-linux-gnu/lib$n.a; done
           git clone --depth 1 --branch v6.7.1 https://github.com/grimme-lab/xtb.git
           cd xtb
           export FFLAGS="-fallow-argument-mismatch"
           A="--buildtype=release --default-library=static -Dprefer_static=true -Dfortran_link_args=-static -Dc_link_args=-static"
-          meson setup build $A -Dopenmp=false \
-            || { rm -rf build; meson setup build $A; } \
-            || { rm -rf build; meson setup build $A -Dlapack=openblas; } \
-            || { rm -rf build; meson setup build $A -Dlapack=custom -Dcustom_libraries=openblas; } \
+          meson setup build $A \
+            || { rm -rf build; meson setup build $A -Dlapack=netlib; } \
             || { echo "=== ECHEC CONFIGURATION ==="; tail -30 build/meson-logs/meson-log.txt; exit 1; }
           for d in subprojects/*/; do
             n=$(basename "$d")
-            if [ -f "$d/meson.build" ]; then
-              meson configure build -D$n:default_library=static -D$n:openmp=false \
-                || meson configure build -D$n:default_library=static || true
-            fi
+            if [ -f "$d/meson.build" ]; then meson configure build -D$n:default_library=static || true; fi
           done
           ninja -C build -k 0 2>&1 | tee ninja.log || true
           echo "=========== ERREURS ==========="
           grep -n -A6 "FAILED:" ninja.log | cut -c1-300 | head -60
           test -f build/xtb
-          printf '3\n\nO 0.0 0.0 0.0\nH 0.96 0.0 0.0\nH -0.24 0.93 0.0\n' > w0.xyz
-          echo "=== QUI APPELLE MBIND ==="
-          GLIBC_TUNABLES=glibc.pthread.rseq=0 OMP_NUM_THREADS=1 strace -f -k -e trace=mbind ./build/xtb w0.xyz --gfn 2 --opt 2>&1 | grep -B2 -A14 "mbind(" | head -40 || true
           strip build/xtb || true
           mkdir -p ../xtb-bin
           cp build/xtb ../xtb-bin/libxtb.so
       - uses: actions/cache/save@v4
-        if: always() && steps.obc.outputs.cache-hit != 'true'
+        if: always() && steps.lpc.outputs.cache-hit != 'true'
         with:
-          path: ~/ob
-          key: openblas-0.3.27-noaff-v1
+          path: ~/lp
+          key: lapack-3.12.0-v1
       - name: Test appels systeme
         run: |
           sudo apt-get install -y strace
           printf '3\n\nO 0.0 0.0 0.0\nH 0.96 0.0 0.0\nH -0.24 0.93 0.0\n' > water.xyz
           chmod +x xtb-bin/libxtb.so
-          export GLIBC_TUNABLES=glibc.pthread.rseq=0 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+          export GLIBC_TUNABLES=glibc.pthread.rseq=0 OMP_NUM_THREADS=1
           strace -f -o st.log ./xtb-bin/libxtb.so water.xyz --gfn 2 --opt > out.log 2>&1 || true
           grep -E "TOTAL ENERGY|normal termination" out.log | head -3
           echo "=== MBIND ==="; grep -c mbind st.log || true
@@ -103,4 +95,3 @@ jobs:
           name: Adylase-apk
           path: "**/*.apk"
           if-no-files-found: error
-          
