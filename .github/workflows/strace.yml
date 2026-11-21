@@ -1,0 +1,22 @@
+name: Strace xtb
+on: workflow_dispatch
+jobs:
+  s:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/cache/restore@v4
+        with:
+          path: xtb-bin
+          key: xtb-6.7.1-arm64-v1
+          fail-on-cache-miss: true
+      - run: |
+          sudo apt-get update && sudo apt-get install -y strace
+          printf '3\n\nO 0.0 0.0 0.0\nH 0.96 0.0 0.0\nH -0.24 0.93 0.0\n' > water.xyz
+          chmod +x xtb-bin/libxtb.so
+          export GLIBC_TUNABLES=glibc.pthread.rseq=0 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1 OMP_STACKSIZE=256M
+          strace -f -o st.log ./xtb-bin/libxtb.so water.xyz --gfn 2 --opt > out.log 2>&1 || true
+          tail -4 out.log
+          echo "=== SYSCALLS ==="
+          sed -E 's/^[0-9]+ +//' st.log | sed -E 's/\(.*//' | sort | uniq -c | sort -rn | awk '{printf "%s ", $2}'
+          echo
+          
