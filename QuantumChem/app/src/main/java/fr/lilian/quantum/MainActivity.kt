@@ -29,6 +29,8 @@ import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.IntSize
+import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -139,8 +141,9 @@ fun relax(m: Mol, iters: Int = 1): Mol {
     val nbs = List(n) { ArrayList<Bond>() }
     for (b in m.bonds) {
         nbs[b.a].add(b); nbs[b.b].add(b)
-        cons[key(b.a, b.b)] = floatArrayOf(ln(m.atoms[b.a], m.atoms[b.b], b.o), 0.3f)
+        cons[key(b.a, b.b)] = floatArrayOf(ln(m.atoms[b.a], m.atoms[b.b], b.o), 0.5f)
     }
+    val sp2 = ArrayList<IntArray>()
     for (k in 0 until n) {
         val nb = nbs[k]
         if (nb.size < 2) continue
@@ -148,12 +151,12 @@ fun relax(m: Mol, iters: Int = 1): Mol {
         val used = nb.sumOf { it.o }
         val sn = nb.size + maxOf(0, (tgt[el] ?: used) - used) + (lonePairs[el] ?: 0)
         val c = if (sn >= 4) -0.334f else if (sn == 3) -0.5f else -1f
+        val others = nb.map { if (it.a == k) it.b else it.a }
+        if (nb.size == 3 && sn == 3) sp2.add(intArrayOf(k, others[0], others[1], others[2]))
         for (x in 0 until nb.size) for (y in x + 1 until nb.size) {
-            val ox = if (nb[x].a == k) nb[x].b else nb[x].a
-            val oy = if (nb[y].a == k) nb[y].b else nb[y].a
-            val l1 = ln(m.atoms[k], m.atoms[ox], nb[x].o); val l2 = ln(m.atoms[k], m.atoms[oy], nb[y].o)
-            val kk = key(ox, oy)
-            if (!cons.containsKey(kk)) cons[kk] = floatArrayOf(sqrt(maxOf(0f, l1 * l1 + l2 * l2 - 2f * l1 * l2 * c)), 0.15f)
+            val l1 = ln(m.atoms[k], m.atoms[others[x]], nb[x].o); val l2 = ln(m.atoms[k], m.atoms[others[y]], nb[y].o)
+            val kk = key(others[x], others[y])
+            if (!cons.containsKey(kk)) cons[kk] = floatArrayOf(sqrt(maxOf(0f, l1 * l1 + l2 * l2 - 2f * l1 * l2 * c)), 0.3f)
         }
     }
     repeat(iters) {
@@ -163,18 +166,63 @@ fun relax(m: Mol, iters: Int = 1): Mol {
             val c = cons[key(i, j)]
             val th = if (m.atoms[i].el == "H" || m.atoms[j].el == "H") 1.8f else 2.4f
             val t = c?.get(0) ?: th
-            val k = c?.get(1) ?: 0.08f
+            val k = c?.get(1) ?: 0.1f
             if (c != null || d < t) {
                 val s = k * (d - t) / d / 2f
                 p[i][0] += dx * s; p[i][1] += dy * s; p[i][2] += dz * s
                 p[j][0] -= dx * s; p[j][1] -= dy * s; p[j][2] -= dz * s
             }
         }
+        for (q in sp2) {
+            val k = q[0]; val a = p[q[1]]; val b = p[q[2]]; val c = p[q[3]]
+            val ux = b[0] - a[0]; val uy = b[1] - a[1]; val uz = b[2] - a[2]
+            val vx = c[0] - a[0]; val vy = c[1] - a[1]; val vz = c[2] - a[2]
+            var nx = uy * vz - uz * vy; var ny = uz * vx - ux * vz; var nz = ux * vy - uy * vx
+            val nl = sqrt(nx * nx + ny * ny + nz * nz) + 1e-6f
+            nx /= nl; ny /= nl; nz /= nl
+            val cx = (a[0] + b[0] + c[0]) / 3f; val cy = (a[1] + b[1] + c[1]) / 3f; val cz = (a[2] + b[2] + c[2]) / 3f
+            val dd = (p[k][0] - cx) * nx + (p[k][1] - cy) * ny + (p[k][2] - cz) * nz
+            p[k][0] -= nx * dd * 0.3f; p[k][1] -= ny * dd * 0.3f; p[k][2] -= nz * dd * 0.3f
+            for (o in listOf(a, b, c)) { o[0] += nx * dd * 0.1f; o[1] += ny * dd * 0.1f; o[2] += nz * dd * 0.1f }
+        }
     }
     var mv = 0f
     m.atoms.forEachIndexed { i, a -> mv = maxOf(mv, abs(p[i][0] - a.x) + abs(p[i][1] - a.y) + abs(p[i][2] - a.z)) }
     if (mv < 5e-4f) return m
     return Mol(m.atoms.mapIndexed { i, a -> a.copy(x = p[i][0], y = p[i][1], z = p[i][2]) }, m.bonds)
+}
+
+fun toXyz(m: Mol): String = m.atoms.size.toString() + "\n\n" +
+    m.atoms.joinToString("\n") { String.format(java.util.Locale.US, "%s %.6f %.6f %.6f", it.el, it.x, it.y, it.z) } + "\n"
+
+fun fromXyz(m: Mol, s: String): Mol? {
+    val l = s.lines().drop(2).filter { it.isNotBlank() }
+    if (l.size != m.atoms.size) return null
+    return try {
+        m.copy(atoms = m.atoms.mapIndexed { i, a ->
+            val q = l[i].trim().split(Regex("\\s+"))
+            a.copy(x = q[1].toFloat(), y = q[2].toFloat(), z = q[3].toFloat())
+        })
+    } catch (e: Exception) { null }
+}
+
+fun xtbJob(ctx: android.content.Context, args: List<String>, xyz: String): Triple<Int, String, String?> {
+    val exe = File(ctx.applicationInfo.nativeLibraryDir, "libxtb.so")
+    val dir = File(ctx.cacheDir, "xtb").apply { mkdirs() }
+    dir.listFiles()?.forEach { it.delete() }
+    File(dir, "mol.xyz").writeText(xyz)
+    if (!exe.exists()) return Triple(-1, "xtb absent", null)
+    val pb = ProcessBuilder(listOf(exe.absolutePath, "mol.xyz") + args).directory(dir).redirectErrorStream(true)
+    pb.environment()["GLIBC_TUNABLES"] = "glibc.pthread.rseq=0"
+    pb.environment()["OMP_STACKSIZE"] = "256M"
+    pb.environment()["OMP_NUM_THREADS"] = Runtime.getRuntime().availableProcessors().toString()
+    pb.environment()["HOME"] = dir.absolutePath
+    return try {
+        val pr = pb.start()
+        val out = pr.inputStream.bufferedReader().readText()
+        val c = pr.waitFor()
+        Triple(c, out, File(dir, "xtbopt.xyz").takeIf { it.exists() }?.readText())
+    } catch (e: Exception) { Triple(-2, "Erreur: " + e.message, null) }
 }
 
 fun segD(p: Offset, a: Offset, b: Offset): Float {
@@ -255,7 +303,7 @@ fun App() {
     var scale by remember { mutableStateOf(1.6f) }
     var yaw by remember { mutableStateOf(0.4f) }
     var pitch by remember { mutableStateOf(0.3f) }
-    var off by remember { mutableStateOf(Offset(450f, 350f)) }
+    var off by remember { mutableStateOf(Offset.Zero) }
     var picked by remember { mutableStateOf(listOf<Int>()) }
     var dialog by remember { mutableStateOf("") }
     var msg by remember { mutableStateOf("") }
@@ -266,25 +314,30 @@ fun App() {
     var xtbOut by remember { mutableStateOf("") }
     val scope = rememberCoroutineScope()
     val ctx = LocalContext.current
+    var cs by remember { mutableStateOf(IntSize.Zero) }
+    var pv by remember { mutableStateOf(Triple(0f, 0f, 0f)) }
+    var running by remember { mutableStateOf(false) }
+    var calcLog by remember { mutableStateOf("") }
 
-    LaunchedEffect(shape) { while (shape) { mol = relax(mol, 2); delay(33) } }
+    LaunchedEffect(shape) { while (shape) { mol = relax(mol, 6); delay(33) } }
 
     fun t(f: String, e: String) = if (fr) f else e
     fun commit(m: Mol) { undo.add(mol); redo.clear(); mol = m }
     fun fin(m: Mol): Mol = if (autoH) addH(m) else m
     fun rot(a: Atom): V {
         val cy = cos(yaw); val sy = sin(yaw); val cp = cos(pitch); val sp = sin(pitch)
-        val x1 = a.x * cy + a.z * sy
-        val z1 = -a.x * sy + a.z * cy
-        return Triple(x1, a.y * cp - z1 * sp, a.y * sp + z1 * cp)
+        val ax = a.x - pv.first; val ay = a.y - pv.second; val az = a.z - pv.third
+        val x1 = ax * cy + az * sy
+        val z1 = -ax * sy + az * cy
+        return Triple(x1, ay * cp - z1 * sp, ay * sp + z1 * cp)
     }
     fun unrot(x1: Float, y1: Float, z2: Float): V {
         val cy = cos(yaw); val sy = sin(yaw); val cp = cos(pitch); val sp = sin(pitch)
         val y = y1 * cp + z2 * sp
         val z1 = -y1 * sp + z2 * cp
-        return Triple(x1 * cy - z1 * sy, y, x1 * sy + z1 * cy)
+        return Triple(x1 * cy - z1 * sy + pv.first, y + pv.second, x1 * sy + z1 * cy + pv.third)
     }
-    fun scrOf(a: Atom): Offset { val r = rot(a); return Offset(r.first * U * scale + off.x, r.second * U * scale + off.y) }
+    fun scrOf(a: Atom): Offset { val r = rot(a); return Offset(r.first * U * scale + (off.x + cs.width / 2f), r.second * U * scale + (off.y + cs.height / 2f)) }
     fun hit(p: Offset): Int? {
         var best: Int? = null
         var bz = -1e9f
@@ -300,7 +353,34 @@ fun App() {
     }
     fun baseMol() = if (autoH) removeH(mol) else mol
     fun hIdx(h: Int): Int? = if (!autoH) h else mol.atoms.indices.filter { mol.atoms[it].el != "H" }.indexOf(h).takeIf { it >= 0 }
-    fun example(m: Mol) { commit(addH(m)); picked = emptyList() }
+    fun focus(m: Mol = mol) {
+        if (m.atoms.isEmpty()) return
+        val cx = m.atoms.map { it.x }.average().toFloat()
+        val cy = m.atoms.map { it.y }.average().toFloat()
+        val cz = m.atoms.map { it.z }.average().toFloat()
+        pv = Triple(cx, cy, cz); off = Offset.Zero
+        val r = m.atoms.maxOf { sqrt((it.x - cx) * (it.x - cx) + (it.y - cy) * (it.y - cy) + (it.z - cz) * (it.z - cz)) } + 1.5f
+        if (cs.width > 0) scale = (minOf(cs.width, cs.height) / 2f / (U * r)).coerceIn(0.4f, 6f)
+    }
+    fun example(m: Mol) { val n = relax(addH(m), 300); commit(n); picked = emptyList(); focus(n) }
+    fun xtbOpt() {
+        if (running || mol.atoms.isEmpty()) return
+        running = true
+        msg = t("xtb : optimisation GFN2 en cours…", "xtb: GFN2 optimization running…")
+        val snap = mol
+        scope.launch {
+            val r = withContext(Dispatchers.IO) { xtbJob(ctx, listOf("--gfn", "2", "--opt"), toXyz(snap)) }
+            running = false
+            val nm = r.third?.let { fromXyz(snap, it) }
+            val e = Regex("TOTAL ENERGY\\s+(-?[0-9.]+)").find(r.second)?.groupValues?.get(1) ?: "?"
+            if (r.first == 0 && nm != null) {
+                shape = false
+                commit(nm)
+                msg = t("Optimisation xtb terminée (E = ", "xtb optimization done (E = ") + e + " Eh)"
+                calcLog = "Optimisation de géométrie – xtb 6.7.1, GFN2-xTB, phase gaz (pas de solvant ALPB), charge 0 – commande : xtb mol.xyz --gfn 2 --opt – énergie : " + e + " Eh\nxyz d'entrée :\n" + toXyz(snap)
+            } else msg = "xtb : exit=" + r.first + " " + r.second.lines().filter { it.isNotBlank() }.takeLast(2).joinToString(" | ")
+        }
+    }
     fun finishBond(sa: Int, p: Offset) {
         val a = hIdx(sa) ?: return
         val base = baseMol()
@@ -311,7 +391,7 @@ fun App() {
                 commit(fin(base.copy(bonds = base.bonds + Bond(a, b))))
         } else {
             val at = base.atoms[a]
-            val w = unrot((p.x - off.x) / (U * scale), (p.y - off.y) / (U * scale), rot(at).third)
+            val w = unrot((p.x - (off.x + cs.width / 2f)) / (U * scale), (p.y - (off.y + cs.height / 2f)) / (U * scale), rot(at).third)
             var dx = w.first - at.x; var dy = w.second - at.y; var dz = w.third - at.z
             var d = sqrt(dx * dx + dy * dy + dz * dz)
             if (d < 1e-3f) { dx = 1f; dy = 0f; dz = 0f; d = 1f }
@@ -333,9 +413,9 @@ fun App() {
                     val b = mol.bonds[bi]
                     if (autoH && (mol.atoms[b.a].el == "H" || mol.atoms[b.b].el == "H")) return
                     val nm = mol.copy(bonds = mol.bonds.mapIndexed { i, x -> if (i == bi) x.copy(o = x.o % 3 + 1) else x })
-                    commit(if (autoH) fin(removeH(nm)) else nm)
+                    commit(relax(if (autoH) fin(removeH(nm)) else nm, 200))
                 } else {
-                    val w = unrot((p.x - off.x) / (U * scale), (p.y - off.y) / (U * scale), 0f)
+                    val w = unrot((p.x - (off.x + cs.width / 2f)) / (U * scale), (p.y - (off.y + cs.height / 2f)) / (U * scale), 0f)
                     commit(fin(Mol(baseMol().let { it.atoms + Atom(el, w.first, w.second, w.third) }, baseMol().bonds)))
                 }
             }
@@ -368,10 +448,12 @@ fun App() {
             Menu("Tool", listOf(
                 t("Ajouter les H", "Add H") to { commit(addH(mol)) },
                 t("Retirer les H", "Remove H") to { commit(removeH(mol)) },
+                t("Optimiser (xtb GFN2)", "Optimize (xtb GFN2)") to { xtbOpt() },
+                "Focus" to { focus() },
                 t("Estimer pKa", "Estimate pKa") to { msg = t("pKa : étape suivante", "pKa: next step") }
             ))
             Text("Shaping", color = Color.White, modifier = Modifier.padding(start = 8.dp, end = 6.dp))
-            Switch(checked = shape, onCheckedChange = { shape = it },
+            Switch(checked = shape, onCheckedChange = { shape = it; if (it) mol = relax(mol, 300) },
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = Color.White, checkedTrackColor = Color(0xFF2ECC71),
                     uncheckedThumbColor = Color.White, uncheckedTrackColor = Color(0xFF777777), uncheckedBorderColor = Color(0xFF777777)))
@@ -401,7 +483,7 @@ fun App() {
                 FilledTonalButton(onClick = { dialog = "hal" }, modifier = Modifier.width(64.dp), contentPadding = PaddingValues(0.dp)) { Text("X") }
                 FilledTonalButton(onClick = { dialog = "tab" }, modifier = Modifier.width(64.dp), contentPadding = PaddingValues(0.dp)) { Text("TAB") }
             }
-            Canvas(Modifier.weight(1f).fillMaxHeight().pointerInput(mode) {
+            Canvas(Modifier.weight(1f).fillMaxHeight().onSizeChanged { cs = it }.pointerInput(mode) {
                 awaitEachGesture {
                     val down = awaitFirstDown()
                     val sa = hit(down.position)
@@ -422,7 +504,7 @@ fun App() {
                                     if (!pushed) { undo.add(mol); redo.clear(); pushed = true }
                                     val w = unrot(d.x / (U * scale), d.y / (U * scale), 0f)
                                     val l = mol.atoms.toMutableList()
-                                    l[sa] = l[sa].copy(x = l[sa].x + w.first, y = l[sa].y + w.second, z = l[sa].z + w.third)
+                                    l[sa] = l[sa].copy(x = l[sa].x + w.first - pv.first, y = l[sa].y + w.second - pv.second, z = l[sa].z + w.third - pv.third)
                                     mol = mol.copy(atoms = l)
                                 } else if (sa != null && mode == Mode.DRAW) { dragFrom = sa; dragPos = cur }
                                 else { yaw -= d.x * 0.01f; pitch -= d.y * 0.01f }
@@ -436,7 +518,7 @@ fun App() {
                 }
             }) {
                 val pr = mol.atoms.map { rot(it) }
-                fun scr(i: Int) = Offset(pr[i].first * U * scale + off.x, pr[i].second * U * scale + off.y)
+                fun scr(i: Int) = Offset(pr[i].first * U * scale + (off.x + cs.width / 2f), pr[i].second * U * scale + (off.y + cs.height / 2f))
                 fun cyl(c: Color, a: Offset, b: Offset, w: Float) {
                     drawLine(lerp(c, Color.Black, 0.45f), a, b, strokeWidth = w, cap = StrokeCap.Round)
                     drawLine(c, a, b, strokeWidth = w * 0.65f, cap = StrokeCap.Round)
@@ -482,6 +564,8 @@ fun App() {
                     modifier = Modifier.width(64.dp), contentPadding = PaddingValues(0.dp)) { Text("↶") }
                 FilledTonalButton(onClick = { if (redo.isNotEmpty()) { undo.add(mol); mol = redo.removeLast() } },
                     modifier = Modifier.width(64.dp), contentPadding = PaddingValues(0.dp)) { Text("↷") }
+                FilledTonalButton(onClick = { focus() },
+                    modifier = Modifier.width(64.dp), contentPadding = PaddingValues(0.dp)) { Text("Focus") }
             }
         }
         val dist = if (mode == Mode.MEASURE && picked.size == 2 && picked.all { it < mol.atoms.size }) {
@@ -516,7 +600,11 @@ fun App() {
                     Text(t("Développement", "Development"), fontSize = 16.sp)
                     Text(t("Application entièrement programmée par Claude (Anthropic), sur la demande de Lilian Rouillé.", "App entirely programmed by Claude (Anthropic), at the request of Lilian Rouillé."))
                     Spacer(Modifier.height(10.dp))
-                    Text(t("Calculs : xtb (GFN2-xTB) et Open Babel, à venir.", "Calculations: xtb (GFN2-xTB) and Open Babel, coming."))
+                    Text(t("Méthodes : xtb 6.7.1 (GFN2-xTB), calculs en phase gaz sauf mention contraire (le solvant ALPB est indiqué quand il est utilisé). Open Babel : à venir.", "Methods: xtb 6.7.1 (GFN2-xTB), gas phase unless stated (ALPB solvent shown when used). Open Babel: coming."))
+                    if (calcLog.isNotEmpty()) { Spacer(Modifier.height(8.dp)); Text(calcLog, fontSize = 10.sp) }
+                    Spacer(Modifier.height(8.dp))
+                    Text(t("xyz actuel", "Current xyz"))
+                    Text(toXyz(mol), fontSize = 10.sp)
                     Spacer(Modifier.height(10.dp))
                     Button(onClick = {
                         xtbOut = t("Calcul en cours…", "Running…")
