@@ -27,12 +27,16 @@ jobs:
             cmake --build lapack/b -j4 >> lp.log 2>&1 || { tail -30 lp.log; exit 1; }
             cmake --install lapack/b --prefix $HOME/lp >> lp.log 2>&1 || { tail -30 lp.log; exit 1; }
           fi
-          echo "=== FICHIERS LAPACK ==="; find $HOME/lp -name '*.a' -o -name '*.pc'
           BL=$(find $HOME/lp -name '*blas*.a' | head -n 1)
           LA=$(find $HOME/lp -name '*lapack*.a' | grep -v lapacke | head -n 1)
           PC=$(dirname "$(find $HOME/lp -name lapack.pc | head -n 1)")
           echo "BLAS=$BL LAPACK=$LA PC=$PC"
           test -n "$BL" && test -n "$LA"
+          STAT=$HOME/lpstat
+          rm -rf $STAT; mkdir -p $STAT
+          cp "$BL" $STAT/libblas.a
+          cp "$LA" $STAT/liblapack.a
+          export LIBRARY_PATH=$STAT
           export PKG_CONFIG_PATH=$PC
           sudo ln -sf "$BL" /usr/lib/aarch64-linux-gnu/libblas.a
           sudo ln -sf "$LA" /usr/lib/aarch64-linux-gnu/liblapack.a
@@ -42,7 +46,7 @@ jobs:
           A="--buildtype=release --default-library=static -Dprefer_static=true -Dfortran_link_args=-static -Dc_link_args=-static"
           meson setup build $A \
             || { rm -rf build; meson setup build $A -Dlapack=netlib; } \
-            || { echo "=== ECHEC CONFIGURATION ==="; tail -30 build/meson-logs/meson-log.txt; exit 1; }
+            || { echo "=== DIAG ==="; echo "BL=$BL LA=$LA"; ls -l /usr/lib/aarch64-linux-gnu/libblas.a /usr/lib/aarch64-linux-gnu/liblapack.a $STAT; find $HOME/lp -name '*.a'; grep -n -i "blas" build/meson-logs/meson-log.txt | head -25 | cut -c1-250; exit 1; }
           for d in subprojects/*/; do
             n=$(basename "$d")
             if [ -f "$d/meson.build" ]; then meson configure build -D$n:default_library=static || true; fi
