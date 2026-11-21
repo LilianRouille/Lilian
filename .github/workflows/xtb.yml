@@ -15,7 +15,10 @@ jobs:
           cd xtb
           export FFLAGS="-fallow-argument-mismatch"
           A="--buildtype=release --default-library=static -Dprefer_static=true -Dfortran_link_args=-static -Dc_link_args=-static"
-          meson setup build $A || { echo "=== ECHEC CONFIGURATION ==="; tail -40 build/meson-logs/meson-log.txt; exit 1; }
+          meson setup build $A \
+            || meson setup build --wipe $A -Dlapack=openblas \
+            || meson setup build --wipe $A -Dlapack=custom -Dcustom_libraries=openblas \
+            || { echo "=== ECHEC CONFIGURATION ==="; tail -30 build/meson-logs/meson-log.txt; exit 1; }
           for d in subprojects/*/; do
             n=$(basename "$d")
             if [ -f "$d/meson.build" ]; then meson configure build -D$n:default_library=static || true; fi
