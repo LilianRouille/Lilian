@@ -3,7 +3,47 @@ on:
   push:
   workflow_dispatch:
 jobs:
-  build:
+  xtb:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/cache@v4
+        id: c
+        with:
+          path: xtb-bin
+          key: xtb-6.7.1-arm64-v1
+      - if: steps.c.outputs.cache-hit != 'true'
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gfortran meson ninja-build git libopenblas-dev
+          OB=$(find /usr/lib -name 'libopenblas*.a' | head -n 1)
+          sudo ln -sf "$OB" /usr/lib/aarch64-linux-gnu/libblas.a
+          sudo ln -sf "$OB" /usr/lib/aarch64-linux-gnu/liblapack.a
+          sudo ln -sf "$OB" /usr/lib/aarch64-linux-gnu/libopenblas.a
+          git clone --depth 1 --branch v6.7.1 https://github.com/grimme-lab/xtb.git
+          cd xtb
+          export FFLAGS="-fallow-argument-mismatch"
+          A="--buildtype=release --default-library=static -Dprefer_static=true -Dfortran_link_args=-static -Dc_link_args=-static"
+          meson setup build $A \
+            || meson setup build --wipe $A -Dlapack=openblas \
+            || meson setup build --wipe $A -Dlapack=custom -Dcustom_libraries=openblas \
+            || { echo "=== ECHEC CONFIGURATION ==="; tail -30 build/meson-logs/meson-log.txt; exit 1; }
+          for d in subprojects/*/; do
+            n=$(basename "$d")
+            if [ -f "$d/meson.build" ]; then meson configure build -D$n:default_library=static || true; fi
+          done
+          ninja -C build -k 0 2>&1 | tee ninja.log || true
+          echo "=========== ERREURS ==========="
+          grep -n -A6 "FAILED:" ninja.log | cut -c1-300 | head -60
+          test -f build/xtb
+          strip build/xtb || true
+          mkdir -p ../xtb-bin
+          cp build/xtb ../xtb-bin/libxtb.so
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xtb-bin
+          path: xtb-bin/libxtb.so
+  apk:
+    needs: xtb
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -11,14 +51,19 @@ jobs:
         with: { distribution: temurin, java-version: 17 }
       - uses: gradle/actions/setup-gradle@v4
         with: { gradle-version: "8.7" }
+      - uses: actions/download-artifact@v4
+        with:
+          name: xtb-bin
+          path: xtb-bin
       - name: Compiler
         run: |
           d=$(dirname "$(find . -name settings.gradle.kts | head -n 1)")
+          mkdir -p "$d/app/src/main/jniLibs/arm64-v8a"
+          cp xtb-bin/libxtb.so "$d/app/src/main/jniLibs/arm64-v8a/libxtb.so"
           cd "$d"
           gradle assembleDebug
       - uses: actions/upload-artifact@v4
         with:
-          name: QuantumChem-apk
+          name: Adylase-apk
           path: "**/*.apk"
           if-no-files-found: error
-          
