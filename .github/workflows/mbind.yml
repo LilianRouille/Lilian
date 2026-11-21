@@ -1,0 +1,57 @@
+name: Test mbind
+on: workflow_dispatch
+jobs:
+  t:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - uses: actions/cache/restore@v4
+        with:
+          path: ~/ob
+          key: openblas-0.3.27-noaff-v1
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y gfortran strace
+          cat > c.f90 <<'EOF'
+          program c
+            print *, 'ok'
+          end program
+          EOF
+          cat > a.f90 <<'EOF'
+          program a
+            integer :: i
+            real :: s
+            s = 0
+            !$omp parallel do reduction(+:s)
+            do i = 1, 1000
+              s = s + i
+            end do
+            print *, s
+          end program
+          EOF
+          cat > b.f90 <<'EOF'
+          program b
+            implicit none
+            double precision :: x(100,100), y(100,100), z(100,100)
+            x = 1d0
+            y = 2d0
+            z = 0d0
+            call dgemm('N','N',100,100,100,1d0,x,100,y,100,0d0,z,100)
+            print *, z(1,1)
+          end program
+          EOF
+          gfortran -static c.f90 -o tc
+          gfortran -static -fopenmp a.f90 -o ta
+          export GLIBC_TUNABLES=glibc.pthread.rseq=0 OMP_NUM_THREADS=1 OPENBLAS_NUM_THREADS=1
+          strace -f -o sc.log ./tc > /dev/null 2>&1 || true
+          strace -f -o sa.log ./ta > /dev/null 2>&1 || true
+          echo "=== RESULTAT ==="
+          echo "C (rien) : $(grep -c mbind sc.log)"
+          echo "A (OpenMP) : $(grep -c mbind sa.log)"
+          if [ -f "$HOME/ob/lib/libopenblas.a" ]; then
+            gfortran -static b.f90 -o tb $HOME/ob/lib/libopenblas.a -lpthread -lm
+            strace -f -o sb.log ./tb > /dev/null 2>&1 || true
+            echo "B (OpenBLAS) : $(grep -c mbind sb.log)"
+          else
+            echo "B (OpenBLAS) : cache absent"
+          fi
+          
