@@ -1,0 +1,19 @@
+name: Build xtb (test)
+on: workflow_dispatch
+jobs:
+  xtb:
+    runs-on: ubuntu-24.04-arm
+    steps:
+      - run: |
+          sudo apt-get update
+          sudo apt-get install -y gfortran meson ninja-build git liblapack-dev libblas-dev
+          git clone --depth 1 --branch v6.7.1 https://github.com/grimme-lab/xtb.git
+          cd xtb
+          meson setup build --buildtype=release -Dla_backend=netlib -Dfortran_link_args=-static -Dc_link_args=-static
+          ninja -C build
+          ls -l build/xtb
+      - uses: actions/upload-artifact@v4
+        with:
+          name: xtb-arm64
+          path: xtb/build/xtb
+          
