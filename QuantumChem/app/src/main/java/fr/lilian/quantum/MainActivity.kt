@@ -506,6 +506,10 @@ fun App() {
     var charge by remember { mutableStateOf(0) }
     var scanT by remember { mutableStateOf(0f) }
     var fuLobes by remember { mutableStateOf(true) }
+    var fuVals by remember { mutableStateOf(true) }
+    var scanPreOpt by remember { mutableStateOf(true) }
+    var scanTight by remember { mutableStateOf(false) }
+    var scanWarn by remember { mutableStateOf("") }
     var fuMeshM by remember { mutableStateOf<Mesh?>(null) }
     var fuMeshP by remember { mutableStateOf<Mesh?>(null) }
     val vpaint = remember { Paint() }
@@ -727,13 +731,13 @@ fun App() {
         running = true
         scope.launch {
             try {
-                optStep("Scan – optimisation initiale") ?: return@launch
+                if (scanPreOpt) { optStep("Scan – optimisation initiale") ?: return@launch }
                 val pa = mol.atoms[i]; val pb = mol.atoms[j]
                 val d0 = sqrt((pa.x - pb.x) * (pa.x - pb.x) + (pa.y - pb.y) * (pa.y - pb.y) + (pa.z - pb.z) * (pa.z - pb.z))
                 val inp = "\$opt\n  maxcycle=500\n\$constrain\n  force constant=1.0\n  distance: " + (i + 1) + ", " + (j + 1) + ", auto\n\$scan\n  1: " +
                     String.format(java.util.Locale.US, "%.3f, %.3f, %d", d0, d1, nImg) + "\n\$end\n"
                 val snap = mol
-                val args = xargs() + listOf("--opt", "--input", "scan.inp")
+                val args = xargs() + (if (scanTight) listOf("--opt", "tight") else listOf("--opt")) + listOf("--input", "scan.inp")
                 busyMsg = t("Scan en cours…", "Scan running…"); progress = 0f; eta = t("Démarrage…", "Starting…")
                 val t0 = System.currentTimeMillis()
                 val r = withContext(Dispatchers.IO) {
@@ -751,8 +755,12 @@ fun App() {
                 if (ps.first.isEmpty()) { msg = failMsg(r); return@launch }
                 scanFrames = ps.first; scanE = ps.second; scanT = 0f; scanPlay = false
                 scanD = Pair(frameDist(ps.first.first(), i, j), frameDist(ps.first.last(), i, j))
+                val conv = Regex("GEOMETRY OPTIMIZATION CONVERGED").findAll(r.out).count()
+                val fail = Regex("FAILED TO CONVERGE").findAll(r.out).count()
+                scanWarn = if (fail > 0) "⚠ " + fail + t(" optimisation(s) non convergée(s) sur ", " optimization(s) not converged out of ") + (conv + fail) + t(" : barrière peu fiable", ": barrier unreliable")
+                    else "✓ " + conv + t(" optimisations convergées", " optimizations converged")
                 logCalc("Scan 1D (atomes " + (i + 1) + "–" + (j + 1) + ", " + ps.first.size + " images)", args, snap)
-                calcLog += "\nFichier d'entrée scan.inp :\n" + inp
+                calcLog += "\nConvergence des optimisations : " + scanWarn + "\nFichier d'entrée scan.inp :\n" + inp
                 msg = t("Scan terminé : ", "Scan done: ") + ps.first.size + t(" images", " images")
             } finally { running = false }
         }
@@ -799,7 +807,7 @@ fun App() {
     fun tapAt(p: Offset) {
         val h = hit(p)
         run {
-            val gcx = 72f; val gcy = cs.height - 72f
+            val gcx = 44f; val gcy = cs.height - 40f
             val cyw = cos(yaw); val syw = sin(yaw); val cpt = cos(pitch); val spt = sin(pitch)
             val ax3 = listOf(Triple(1f, 0f, 0f), Triple(0f, -1f, 0f), Triple(0f, 0f, 1f))
             val half = (PI / 2).toFloat()
@@ -808,7 +816,7 @@ fun App() {
                 val e = ax3[ai]
                 val x1 = e.first * cyw + e.third * syw; val z1 = -e.first * syw + e.third * cyw
                 val y1 = e.second * cpt - z1 * spt
-                if ((Offset(gcx + x1 * 46f, gcy + y1 * 46f) - p).getDistance() < 32f) { yaw = tg[ai].first; pitch = tg[ai].second; return }
+                if ((Offset(gcx + x1 * 32f, gcy + y1 * 32f) - p).getDistance() < 26f) { yaw = tg[ai].first; pitch = tg[ai].second; return }
             }
         }
         if (react == "scan" && scanFrames.isEmpty()) { if (h != null) picked = (picked + h).takeLast(2); return }
@@ -865,7 +873,6 @@ fun App() {
                 t("Charges (Mulliken) on/off", "Charges (Mulliken) on/off") to { showCh = !showCh },
                 t("Mode libre (xtb)", "Free mode (xtb)") to { dialog = "free" },
                 "Focus" to { focus() },
-                t("Estimer pKa", "Estimate pKa") to { msg = t("pKa : étape suivante", "pKa: next step") }
             ))
             Menu(t("Paramètres", "Settings"), listOf(
                 "Français" to { fr = true }, "English" to { fr = false },
@@ -1002,7 +1009,7 @@ fun App() {
                             val p2 = Paint().apply { textSize = 26f; textAlign = Paint.Align.CENTER; color = if (qShow[i] < 0) 0xFFFF8A80.toInt() else 0xFF80D8FF.toInt(); isFakeBoldText = true }
                             drawContext.canvas.nativeCanvas.drawText(String.format("%+.2f", qShow[i]), s.x, s.y - r - 6f, p2)
                         }
-                        if (fuMode.isNotEmpty() && fP.size == mol.atoms.size && fM.size == mol.atoms.size) {
+                        if (fuVals && fuMode.isNotEmpty() && fP.size == mol.atoms.size && fM.size == mol.atoms.size) {
                             val p3 = Paint().apply { textSize = 24f; textAlign = Paint.Align.CENTER; color = 0xFFFFD180.toInt(); isFakeBoldText = true }
                             var yy = s.y + r + 22f
                             if (fuMode == "f-" || fuMode == "both") { drawContext.canvas.nativeCanvas.drawText(String.format("f− %.2f", fM[i]), s.x, yy, p3); yy += 26f }
@@ -1026,7 +1033,7 @@ fun App() {
                     nc.restoreToCount(sc)
                 }
                 run {
-                    val gcx = 72f; val gcy = size.height - 72f
+                    val gcx = 44f; val gcy = size.height - 40f
                     val gy = cos(yaw); val gys = sin(yaw); val gp = cos(pitch); val gps = sin(pitch)
                     val axs = listOf(Triple(1f, 0f, 0f), Triple(0f, -1f, 0f), Triple(0f, 0f, 1f))
                     val acol = listOf(Color(0xFFE53935), Color(0xFF43A047), Color(0xFF1E88E5))
@@ -1036,17 +1043,17 @@ fun App() {
                         Triple(x1, e.second * gp - z1 * gps, e.second * gps + z1 * gp)
                     }
                     for (ai in aproj.indices.sortedBy { aproj[it].third }) {
-                        val q3 = aproj[ai]; val ex = gcx + q3.first * 46f; val ey = gcy + q3.second * 46f
+                        val q3 = aproj[ai]; val ex = gcx + q3.first * 32f; val ey = gcy + q3.second * 32f
                         drawLine(acol[ai], Offset(gcx, gcy), Offset(ex, ey), 6f, StrokeCap.Round)
-                        drawCircle(acol[ai], 15f, Offset(ex, ey))
-                        val pa = Paint().apply { textSize = 22f; textAlign = Paint.Align.CENTER; color = android.graphics.Color.WHITE; isFakeBoldText = true }
-                        drawContext.canvas.nativeCanvas.drawText(albl[ai], ex, ey + 8f, pa)
+                        drawCircle(acol[ai], 12f, Offset(ex, ey))
+                        val pa = Paint().apply { textSize = 18f; textAlign = Paint.Align.CENTER; color = android.graphics.Color.WHITE; isFakeBoldText = true }
+                        drawContext.canvas.nativeCanvas.drawText(albl[ai], ex, ey + 6f, pa)
                     }
                 }
                 val df = dragFrom
                 if (df != null && df < pr.size) drawLine(Color(0xFF00B0FF), scr(df), dragPos, strokeWidth = 6f, cap = StrokeCap.Round)
             }
-            Column(Modifier.verticalScroll(rememberScrollState()).padding(4.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()).padding(4.dp), horizontalAlignment = Alignment.CenterHorizontally) {
                 FilledTonalButton(onClick = { if (undo.isNotEmpty()) { redo.add(mol); mol = undo.removeLast() } },
                     modifier = Modifier.width(64.dp), contentPadding = PaddingValues(0.dp)) { Text("↶") }
                 FilledTonalButton(onClick = { if (redo.isNotEmpty()) { undo.add(mol); mol = redo.removeLast() } },
@@ -1105,6 +1112,8 @@ fun App() {
                         FilterChip(selected = chType == "Mulliken", onClick = { chType = "Mulliken" }, label = { Text("Mulliken") }, modifier = Modifier.padding(2.dp))
                         FilterChip(selected = chType == "CM5", onClick = { chType = "CM5" }, label = { Text("CM5") }, modifier = Modifier.padding(2.dp))
                         FilterChip(selected = fuLobes, onClick = { fuLobes = !fuLobes }, label = { Text(t("Lobes 3D", "3D lobes")) }, modifier = Modifier.padding(2.dp))
+                        FilterChip(selected = fuVals, onClick = { fuVals = !fuVals }, label = { Text(t("Valeurs", "Values")) }, modifier = Modifier.padding(2.dp))
+                        FilterChip(selected = showCh, onClick = { showCh = !showCh }, label = { Text(t("Charges", "Charges")) }, modifier = Modifier.padding(2.dp))
                     }
                     Button(onClick = { runFukui() }) { Text(t("Calculer (optimisation + 2 points simples)", "Compute (optimization + 2 single points)")) }
                     Text(t("Valeurs par atome : f− = q(N−1) − q(N) ; f+ = q(N) − q(N+1). Lobes 3D (vert f−, orange f+) : approximation par orbitales frontières, f− ≈ HOMO², f+ ≈ LUMO².", "Per-atom values: f− = q(N−1) − q(N); f+ = q(N) − q(N+1). 3D lobes (green f−, orange f+): frontier-orbital approximation, f− ≈ HOMO², f+ ≈ LUMO²."), fontSize = 11.sp, color = Color.Gray)
@@ -1122,6 +1131,8 @@ fun App() {
                                 OutlinedTextField(value = scanN, onValueChange = { scanN = it }, label = { Text("Images") }, singleLine = true, modifier = Modifier.weight(0.6f))
                             }
                             FlowRow { listOf(1, 2, 4).forEach { c -> FilterChip(selected = cores == c, onClick = { cores = c }, label = { Text(t("Cœurs : ", "Cores: ") + c) }, modifier = Modifier.padding(2.dp)) } }
+                            FilterChip(selected = scanPreOpt, onClick = { scanPreOpt = !scanPreOpt }, label = { Text(t("Optimiser d'abord", "Optimize first")) }, modifier = Modifier.padding(2.dp))
+                            FilterChip(selected = scanTight, onClick = { scanTight = !scanTight }, label = { Text(t("Précis (tight)", "Tight convergence")) }, modifier = Modifier.padding(2.dp))
                             Button(onClick = { runScan() }) { Text(t("Lancer le scan", "Run scan")) }
                         }
                         if (picked.isNotEmpty()) TextButton(onClick = { picked = emptyList() }) { Text(t("Annuler la sélection", "Clear selection")) }
@@ -1132,6 +1143,9 @@ fun App() {
                         val rel = ((scanE[i0] + (scanE[i1] - scanE[i0]) * fr) - scanE[0]) * 2625.499638
                         val dNow = if (picked.size >= 2) frameDist(scanFrames[i0], picked[0], picked[1]) * (1f - fr) + frameDist(scanFrames[i1], picked[0], picked[1]) * fr else 0f
                         Text(String.format("%.1f/%d – d = %.3f Å – ΔE = %.1f kJ/mol", scanT + 1f, nF, dNow, rel), color = Color.White, fontSize = 13.sp)
+                        val emax = scanE.maxOrNull() ?: scanE[0]
+                        Text(String.format("Max : %.1f kJ/mol", (emax - scanE[0]) * 2625.499638), color = Color.Gray, fontSize = 12.sp)
+                        if (scanWarn.isNotEmpty()) Text(scanWarn, color = if (scanWarn.startsWith("⚠")) Color(0xFFFF8A80) else Color(0xFF81C784), fontSize = 12.sp)
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             TextButton(onClick = { scanPlay = !scanPlay }) { Text(if (scanPlay) "⏸" else "▶", fontSize = 22.sp) }
                             Slider(value = scanT.coerceIn(0f, (nF - 1).toFloat()), onValueChange = { scanT = it; scanPlay = false },
@@ -1179,7 +1193,7 @@ fun App() {
                     Row {
                         Button(onClick = { runFree() }) { Text(t("Lancer", "Run")) }
                         Spacer(Modifier.width(8.dp))
-                        Button(onClick = { saveToast("adylase_xtb_" + System.currentTimeMillis() / 1000 + ".txt", freeOut) }, enabled = freeOut.isNotEmpty()) { Text(t("Télécharger .txt", "Download .txt")) }
+                        Button(onClick = { saveToast("lilian_xtb_" + System.currentTimeMillis() / 1000 + ".txt", freeOut) }, enabled = freeOut.isNotEmpty()) { Text(t("Télécharger .txt", "Download .txt")) }
                     }
                     freeOpt?.let { o -> TextButton(onClick = { commit(o); dialog = "" }) { Text(t("Appliquer la géométrie optimisée", "Apply optimized geometry")) } }
                     if (freeOut.isNotEmpty()) Text(freeOut.takeLast(6000), fontSize = 9.sp)
@@ -1213,7 +1227,7 @@ fun App() {
     }
     if (dialog == "info") {
         AlertDialog(onDismissRequest = { dialog = "" }, confirmButton = { TextButton(onClick = { dialog = "" }) { Text("OK") } },
-            title = { Text("Adylase") },
+            title = { Text("Lilian") },
             text = {
                 Column(Modifier.verticalScroll(rememberScrollState())) {
                     Text("Lilian Rouillé", fontSize = 16.sp)
@@ -1225,7 +1239,7 @@ fun App() {
                     Spacer(Modifier.height(8.dp))
                     Text(t("Références : GFN2-xTB – C. Bannwarth, S. Ehlert, S. Grimme, J. Chem. Theory Comput. 2019, 15, 1652. Programme xtb – C. Bannwarth et al., WIREs Comput. Mol. Sci. 2021, 11, e1493. ALPB – S. Ehlert et al., J. Chem. Theory Comput. 2021, 17, 4250. CM5 – A. V. Marenich et al., J. Chem. Theory Comput. 2012, 8, 527.", "References: GFN2-xTB – C. Bannwarth, S. Ehlert, S. Grimme, J. Chem. Theory Comput. 2019, 15, 1652. xtb program – C. Bannwarth et al., WIREs Comput. Mol. Sci. 2021, 11, e1493. ALPB – S. Ehlert et al., J. Chem. Theory Comput. 2021, 17, 4250. CM5 – A. V. Marenich et al., J. Chem. Theory Comput. 2012, 8, 527."), fontSize = 10.sp)
                     if (calcLog.isNotEmpty()) { Spacer(Modifier.height(8.dp)); Text(calcLog, fontSize = 10.sp) }
-                    Button(onClick = { saveToast("adylase_rapport_" + System.currentTimeMillis() / 1000 + ".txt", "Adylase – Lilian Rouillé\n\n" + calcLog + "\n\nxyz actuel :\n" + toXyz(mol)) }) { Text(t("Télécharger le rapport (.txt)", "Download report (.txt)")) }
+                    Button(onClick = { saveToast("lilian_rapport_" + System.currentTimeMillis() / 1000 + ".txt", "Lilian – logiciel de Lilian Rouillé\n\n" + calcLog + "\n\nxyz actuel :\n" + toXyz(mol)) }) { Text(t("Télécharger le rapport (.txt)", "Download report (.txt)")) }
                     Spacer(Modifier.height(8.dp))
                     Text(t("xyz actuel", "Current xyz"))
                     Text(toXyz(mol), fontSize = 10.sp)
