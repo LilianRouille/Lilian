@@ -404,6 +404,39 @@ fun ScanPlot(e: List<Double>, d0: Float, d1: Float, tt: Float, modifier: Modifie
     }
 }
 
+@Composable
+fun AxisGizmo(yaw: Float, pitch: Float, onPick: (Float, Float) -> Unit, modifier: Modifier) {
+    val half = (PI / 2).toFloat()
+    val axs = listOf(Triple(1f, 0f, 0f), Triple(0f, -1f, 0f), Triple(0f, 0f, 1f))
+    val tg = listOf(Pair(half, -half), Pair(0f, 0f), Pair(0f, half))
+    fun proj(e: Triple<Float, Float, Float>): Triple<Float, Float, Float> {
+        val x1 = e.first * cos(yaw) + e.third * sin(yaw)
+        val z1 = -e.first * sin(yaw) + e.third * cos(yaw)
+        return Triple(x1, e.second * cos(pitch) - z1 * sin(pitch), e.second * sin(pitch) + z1 * cos(pitch))
+    }
+    Canvas(modifier.pointerInput(yaw, pitch) {
+        detectTapGestures { p ->
+            val cx = size.width / 2f; val cy = size.height / 2f; val len = size.width * 0.32f
+            for (ai in 0 until 3) {
+                val q = proj(axs[ai])
+                if ((Offset(cx + q.first * len, cy + q.second * len) - p).getDistance() < size.width * 0.22f) { onPick(tg[ai].first, tg[ai].second); break }
+            }
+        }
+    }) {
+        val cx = size.width / 2f; val cy = size.height / 2f; val len = size.width * 0.32f
+        val acol = listOf(Color(0xFFE53935), Color(0xFF43A047), Color(0xFF1E88E5))
+        val albl = listOf("X", "Y", "Z")
+        val pr = axs.map { proj(it) }
+        for (ai in pr.indices.sortedBy { pr[it].third }) {
+            val ex = cx + pr[ai].first * len; val ey = cy + pr[ai].second * len
+            drawLine(acol[ai], Offset(cx, cy), Offset(ex, ey), size.width * 0.07f, StrokeCap.Round)
+            drawCircle(acol[ai], size.width * 0.11f, Offset(ex, ey))
+            val pa = Paint().apply { textSize = size.width * 0.15f; textAlign = Paint.Align.CENTER; color = android.graphics.Color.WHITE; isFakeBoldText = true }
+            drawContext.canvas.nativeCanvas.drawText(albl[ai], ex, ey + size.width * 0.05f, pa)
+        }
+    }
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -476,7 +509,7 @@ fun App() {
     var vibSel by remember { mutableStateOf(-1) }
     var vphase by remember { mutableStateOf(0f) }
     var charges by remember { mutableStateOf(listOf<Float>()) }
-    var showCh by remember { mutableStateOf(true) }
+    var showCh by remember { mutableStateOf(false) }
     var freqSummary by remember { mutableStateOf("") }
     var solvent by remember { mutableStateOf("") }
     var cores by remember { mutableStateOf(1) }
@@ -508,7 +541,7 @@ fun App() {
     var fuLobes by remember { mutableStateOf(true) }
     var fuVals by remember { mutableStateOf(true) }
     var scanPreOpt by remember { mutableStateOf(true) }
-    var scanTight by remember { mutableStateOf(false) }
+    var scanTight by remember { mutableStateOf(true) }
     var scanWarn by remember { mutableStateOf("") }
     var fuMeshM by remember { mutableStateOf<Mesh?>(null) }
     var fuMeshP by remember { mutableStateOf<Mesh?>(null) }
@@ -599,6 +632,18 @@ fun App() {
             try {
                 val r = optStep() ?: return@launch
                 msg = t("Optimisation xtb terminée (E = ", "xtb optimization done (E = ") + grab(r.out, "TOTAL ENERGY") + " Eh)"
+            } finally { running = false }
+        }
+    }
+
+    fun runCharges() {
+        if (running || mol.atoms.isEmpty()) return
+        running = true
+        scope.launch {
+            try {
+                optStep("Charges – optimisation") ?: return@launch
+                showCh = true
+                msg = t("Charges calculées (", "Charges computed (") + chType + ")"
             } finally { running = false }
         }
     }
@@ -758,9 +803,9 @@ fun App() {
                 val conv = Regex("GEOMETRY OPTIMIZATION CONVERGED").findAll(r.out).count()
                 val fail = Regex("FAILED TO CONVERGE").findAll(r.out).count()
                 scanWarn = if (fail > 0) "⚠ " + fail + t(" optimisation(s) non convergée(s) sur ", " optimization(s) not converged out of ") + (conv + fail) + t(" : barrière peu fiable", ": barrier unreliable")
-                    else "✓ " + conv + t(" optimisations convergées", " optimizations converged")
+                    else ""
                 logCalc("Scan 1D (atomes " + (i + 1) + "–" + (j + 1) + ", " + ps.first.size + " images)", args, snap)
-                calcLog += "\nConvergence des optimisations : " + scanWarn + "\nFichier d'entrée scan.inp :\n" + inp
+                calcLog += "\nConvergence des optimisations : " + conv + " convergée(s), " + fail + " non convergée(s)" + "\nFichier d'entrée scan.inp :\n" + inp
                 msg = t("Scan terminé : ", "Scan done: ") + ps.first.size + t(" images", " images")
             } finally { running = false }
         }
@@ -806,19 +851,6 @@ fun App() {
     }
     fun tapAt(p: Offset) {
         val h = hit(p)
-        run {
-            val gcx = 44f; val gcy = cs.height - 40f
-            val cyw = cos(yaw); val syw = sin(yaw); val cpt = cos(pitch); val spt = sin(pitch)
-            val ax3 = listOf(Triple(1f, 0f, 0f), Triple(0f, -1f, 0f), Triple(0f, 0f, 1f))
-            val half = (PI / 2).toFloat()
-            val tg = listOf(Pair(half, -half), Pair(0f, 0f), Pair(0f, half))
-            for (ai in 0 until 3) {
-                val e = ax3[ai]
-                val x1 = e.first * cyw + e.third * syw; val z1 = -e.first * syw + e.third * cyw
-                val y1 = e.second * cpt - z1 * spt
-                if ((Offset(gcx + x1 * 32f, gcy + y1 * 32f) - p).getDistance() < 26f) { yaw = tg[ai].first; pitch = tg[ai].second; return }
-            }
-        }
         if (react == "scan" && scanFrames.isEmpty()) { if (h != null) picked = (picked + h).takeLast(2); return }
         when (mode) {
             Mode.DRAW -> if (h != null) {
@@ -896,7 +928,7 @@ fun App() {
                 t("Charges partielles", "Partial charges") to { react = "charges" },
                 t("Orbitales frontières", "Frontier orbitals") to { react = "orb" },
                 t("Fonctions de Fukui", "Fukui functions") to { react = "fukui" },
-                "Scan" to { react = "scan"; picked = emptyList() }
+                "Scan" to { if (react == "scan" || scanFrames.isEmpty()) { scanFrames = emptyList(); scanPlay = false; picked = emptyList() }; react = "scan" }
             ))
         }
         Row(Modifier.horizontalScroll(rememberScrollState())) {
@@ -911,7 +943,8 @@ fun App() {
                 label = { Text(t("H auto", "Auto H")) }, modifier = Modifier.padding(horizontal = 3.dp))
         }
         Row(Modifier.weight(1f).fillMaxWidth()) {
-            Column(Modifier.verticalScroll(rememberScrollState()).padding(4.dp)) {
+            Box(Modifier.fillMaxHeight()) {
+            Column(Modifier.verticalScroll(rememberScrollState()).padding(start = 4.dp, end = 4.dp, top = 4.dp, bottom = 80.dp)) {
                 listOf("C", "H", "O", "N", "S", "B").forEach { e ->
                     FilledTonalButton(onClick = { el = e }, modifier = Modifier.width(64.dp),
                         contentPadding = PaddingValues(0.dp),
@@ -920,6 +953,8 @@ fun App() {
                 }
                 FilledTonalButton(onClick = { dialog = "hal" }, modifier = Modifier.width(64.dp), contentPadding = PaddingValues(0.dp)) { Text("X") }
                 FilledTonalButton(onClick = { dialog = "tab" }, modifier = Modifier.width(64.dp), contentPadding = PaddingValues(0.dp)) { Text("TAB") }
+            }
+            AxisGizmo(yaw, pitch, { y, pt -> yaw = y; pitch = pt }, Modifier.align(Alignment.BottomStart).padding(4.dp).size(72.dp))
             }
             Canvas(Modifier.weight(1f).fillMaxHeight().onSizeChanged { cs = it }.pointerInput(mode) {
                 awaitEachGesture {
@@ -1032,24 +1067,6 @@ fun App() {
                     for (m in meshes) renderMesh(m, nc, vpaint, yaw, pitch, pv, mox, moy, U * scale)
                     nc.restoreToCount(sc)
                 }
-                run {
-                    val gcx = 44f; val gcy = size.height - 40f
-                    val gy = cos(yaw); val gys = sin(yaw); val gp = cos(pitch); val gps = sin(pitch)
-                    val axs = listOf(Triple(1f, 0f, 0f), Triple(0f, -1f, 0f), Triple(0f, 0f, 1f))
-                    val acol = listOf(Color(0xFFE53935), Color(0xFF43A047), Color(0xFF1E88E5))
-                    val albl = listOf("X", "Y", "Z")
-                    val aproj = axs.map { e ->
-                        val x1 = e.first * gy + e.third * gys; val z1 = -e.first * gys + e.third * gy
-                        Triple(x1, e.second * gp - z1 * gps, e.second * gps + z1 * gp)
-                    }
-                    for (ai in aproj.indices.sortedBy { aproj[it].third }) {
-                        val q3 = aproj[ai]; val ex = gcx + q3.first * 32f; val ey = gcy + q3.second * 32f
-                        drawLine(acol[ai], Offset(gcx, gcy), Offset(ex, ey), 6f, StrokeCap.Round)
-                        drawCircle(acol[ai], 12f, Offset(ex, ey))
-                        val pa = Paint().apply { textSize = 18f; textAlign = Paint.Align.CENTER; color = android.graphics.Color.WHITE; isFakeBoldText = true }
-                        drawContext.canvas.nativeCanvas.drawText(albl[ai], ex, ey + 6f, pa)
-                    }
-                }
                 val df = dragFrom
                 if (df != null && df < pr.size) drawLine(Color(0xFF00B0FF), scr(df), dragPos, strokeWidth = 6f, cap = StrokeCap.Round)
             }
@@ -1085,7 +1102,7 @@ fun App() {
                         FilterChip(selected = chType == "CM5", onClick = { chType = "CM5" }, label = { Text(t("CM5 (type Hirshfeld)", "CM5 (Hirshfeld-type)")) }, modifier = Modifier.padding(2.dp))
                         FilterChip(selected = showCh, onClick = { showCh = !showCh }, label = { Text(t("Afficher", "Show")) }, modifier = Modifier.padding(2.dp))
                     }
-                    Button(onClick = { xtbOpt() }) { Text(t("Calculer (optimisation + charges)", "Compute (optimization + charges)")) }
+                    Button(onClick = { runCharges() }) { Text(t("Calculer (optimisation + charges)", "Compute (optimization + charges)")) }
                     Text(t("xtb fournit les charges de Mulliken et CM5. Löwdin et Hirshfeld ne sont pas disponibles : CM5, dérivée de Hirshfeld, les remplace.", "xtb provides Mulliken and CM5 charges. Löwdin and Hirshfeld are not available: CM5, derived from Hirshfeld, replaces them."), fontSize = 11.sp, color = Color.Gray)
                 }
                 "orb" -> {
@@ -1151,7 +1168,6 @@ fun App() {
                             Slider(value = scanT.coerceIn(0f, (nF - 1).toFloat()), onValueChange = { scanT = it; scanPlay = false },
                                 valueRange = 0f..(nF - 1).toFloat().coerceAtLeast(1f), modifier = Modifier.weight(1f))
                         }
-                        TextButton(onClick = { scanFrames = emptyList(); scanPlay = false; picked = emptyList() }) { Text(t("Nouveau scan", "New scan")) }
                     }
                 }
             }
