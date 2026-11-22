@@ -31,6 +31,8 @@ import androidx.compose.ui.input.pointer.positionChange
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.graphics.Path
+import kotlin.math.roundToInt
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
 import androidx.compose.ui.window.DialogProperties
@@ -227,6 +229,52 @@ fun xtbJob(ctx: android.content.Context, args: List<String>, xyz: String): Tripl
     } catch (e: Exception) { Triple(-2, "Erreur: " + e.message, null) }
 }
 
+class Vib(val freq: Float, val ir: Float, val d: FloatArray)
+
+fun readXtbFile(ctx: android.content.Context, name: String): String? =
+    File(File(ctx.cacheDir, "xtb"), name).takeIf { it.exists() }?.readText()
+
+val fl = Regex("-?\\d+\\.\\d+")
+
+fun parseG98(t: String, n: Int): List<Vib> {
+    val lines = t.lines()
+    val res = ArrayList<Vib>()
+    var i = 0
+    while (i < lines.size) {
+        val l = lines[i]
+        if (l.contains("Frequencies --")) {
+            val fr = fl.findAll(l.substringAfter("--")).map { it.value.toFloat() }.toList()
+            var ir = listOf<Float>()
+            var j = i + 1
+            while (j < lines.size && !lines[j].contains("Atom")) {
+                if (lines[j].contains("IR Inten")) ir = fl.findAll(lines[j].substringAfter("--")).map { it.value.toFloat() }.toList()
+                j++
+            }
+            val d = List(fr.size) { FloatArray(3 * n) }
+            for (a in 0 until n) {
+                val row = lines.getOrNull(j + 1 + a) ?: break
+                val v = fl.findAll(row).map { it.value.toFloat() }.toList()
+                for (k in fr.indices) for (c in 0 until 3) d[k][3 * a + c] = v.getOrElse(3 * k + c) { 0f }
+            }
+            for (k in fr.indices) {
+                val dd = d[k]
+                var mx = 1e-6f
+                for (a in 0 until n) mx = maxOf(mx, sqrt(dd[3 * a] * dd[3 * a] + dd[3 * a + 1] * dd[3 * a + 1] + dd[3 * a + 2] * dd[3 * a + 2]))
+                for (q in dd.indices) dd[q] /= mx
+                if (fr[k] != 0f) res.add(Vib(fr[k], ir.getOrElse(k) { 0f }, dd))
+            }
+            i = j + 1 + n
+        } else i++
+    }
+    return res
+}
+
+fun parseVibspectrum(t: String): List<Vib> = t.lines().filter { !it.trim().startsWith("#") && !it.trim().startsWith("$") }
+    .mapNotNull { l ->
+        val v = fl.findAll(l).map { it.value.toFloat() }.toList()
+        if (v.size >= 2 && v[0] != 0f) Vib(v[0], v[1], FloatArray(0)) else null
+    }
+
 fun segD(p: Offset, a: Offset, b: Offset): Float {
     val ab = b - a
     val l2 = ab.x * ab.x + ab.y * ab.y + 1e-6f
@@ -320,6 +368,34 @@ fun diag(ctx: android.content.Context): String {
     return sb.toString()
 }
 
+@Composable
+fun ScanPlot(e: List<Double>, d0: Float, d1: Float, idx: Int, modifier: Modifier) {
+    val rel = e.map { (it - e[0]) * 2625.499638 }
+    Canvas(modifier) {
+        val w = size.width; val h = size.height
+        val l = 100f; val b = 44f; val tp = 24f; val r = 24f
+        val mn = minOf(0.0, rel.min()); val mx = maxOf(rel.max(), mn + 1e-3)
+        fun px(i: Int) = l + (w - l - r) * (if (rel.size > 1) i.toFloat() / (rel.size - 1) else 0f)
+        fun py(v: Double) = (h - b - (h - b - tp) * ((v - mn) / (mx - mn))).toFloat()
+        drawLine(Color.Gray, Offset(l, tp), Offset(l, h - b), 2f)
+        drawLine(Color.Gray, Offset(l, h - b), Offset(w - r, h - b), 2f)
+        if (mn < 0.0 && mx > 0.0) drawLine(Color(0x55FFFFFF), Offset(l, py(0.0)), Offset(w - r, py(0.0)), 1f)
+        for (i in 1 until rel.size) drawLine(Color(0xFF4FC3F7), Offset(px(i - 1), py(rel[i - 1])), Offset(px(i), py(rel[i])), 4f)
+        rel.forEachIndexed { i, v -> drawCircle(Color(0xFF4FC3F7), 5f, Offset(px(i), py(v))) }
+        if (idx in rel.indices) {
+            drawLine(Color(0x88FFD54F), Offset(px(idx), tp), Offset(px(idx), h - b), 2f)
+            drawCircle(Color(0xFFFFD54F), 11f, Offset(px(idx), py(rel[idx])))
+        }
+        val pt = Paint().apply { color = android.graphics.Color.LTGRAY; textSize = 28f }
+        val nc = drawContext.canvas.nativeCanvas
+        nc.drawText(String.format("%.1f", mx), 4f, tp + 10f, pt)
+        nc.drawText(String.format("%.1f", mn), 4f, h - b, pt)
+        nc.drawText("kJ/mol", 4f, tp + 42f, pt)
+        nc.drawText(String.format("%.2f Å", d0), l, h - 10f, pt)
+        nc.drawText(String.format("%.2f Å", d1), w - r - 120f, h - 10f, pt)
+    }
+}
+
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
@@ -388,11 +464,44 @@ fun App() {
     var pv by remember { mutableStateOf(Triple(0f, 0f, 0f)) }
     var running by remember { mutableStateOf(false) }
     var calcLog by remember { mutableStateOf("") }
+    var vibs by remember { mutableStateOf(listOf<Vib>()) }
+    var vibSel by remember { mutableStateOf(-1) }
+    var vphase by remember { mutableStateOf(0f) }
+    var charges by remember { mutableStateOf(listOf<Float>()) }
+    var showCh by remember { mutableStateOf(true) }
+    var freqSummary by remember { mutableStateOf("") }
+    var solvent by remember { mutableStateOf("") }
+    var cores by remember { mutableStateOf(1) }
+    var busyMsg by remember { mutableStateOf("") }
+    var progress by remember { mutableStateOf(-1f) }
+    var eta by remember { mutableStateOf("") }
+    var react by remember { mutableStateOf("") }
+    var chType by remember { mutableStateOf("Mulliken") }
+    var qC by remember { mutableStateOf(listOf<Float>()) }
+    var fuMode by remember { mutableStateOf("") }
+    var fP by remember { mutableStateOf(listOf<Float>()) }
+    var fM by remember { mutableStateOf(listOf<Float>()) }
+    var molden by remember { mutableStateOf<MolDen?>(null) }
+    var orbSel by remember { mutableStateOf(99) }
+    var orbMesh by remember { mutableStateOf<Mesh?>(null) }
+    var scanFrames by remember { mutableStateOf(listOf<FloatArray>()) }
+    var scanE by remember { mutableStateOf(listOf<Double>()) }
+    var scanIdx by remember { mutableStateOf(0) }
+    var scanPlay by remember { mutableStateOf(false) }
+    var scanD by remember { mutableStateOf(Pair(0f, 0f)) }
+    var scanEnd by remember { mutableStateOf("") }
+    var scanN by remember { mutableStateOf("20") }
+    var freeArgs by remember { mutableStateOf("--gfn 2 --opt") }
+    var freeInp by remember { mutableStateOf("") }
+    var freeOut by remember { mutableStateOf("") }
+    var freeOpt by remember { mutableStateOf<Mol?>(null) }
 
+    LaunchedEffect(scanPlay) { while (scanPlay && scanFrames.size > 1) { scanIdx = (scanIdx + 1) % scanFrames.size; delay(130) } }
+    LaunchedEffect(vibSel) { while (vibSel >= 0) { vphase += 0.15f; delay(33) } }
     LaunchedEffect(shape) { while (shape) { mol = relax(mol, 6); delay(33) } }
 
     fun t(f: String, e: String) = if (fr) f else e
-    fun commit(m: Mol) { undo.add(mol); redo.clear(); mol = m }
+    fun commit(m: Mol) { undo.add(mol); redo.clear(); mol = m; vibs = emptyList(); vibSel = -1; charges = emptyList(); qC = emptyList(); fP = emptyList(); fM = emptyList(); molden = null; orbSel = 99; orbMesh = null; scanFrames = emptyList(); scanPlay = false }
     fun fin(m: Mol): Mol = if (autoH) addH(m) else m
     fun rot(a: Atom): V {
         val cy = cos(yaw); val sy = sin(yaw); val cp = cos(pitch); val sp = sin(pitch)
@@ -433,24 +542,198 @@ fun App() {
         if (cs.width > 0) scale = (minOf(cs.width, cs.height) / 2f / (U * r)).coerceIn(0.4f, 6f)
     }
     fun example(m: Mol) { val n = relax(addH(m), 300); commit(n); picked = emptyList(); focus(n) }
+    fun xargs(): List<String> = listOf("--gfn", "2") + (if (solvent.isNotEmpty()) listOf("--alpb", solvent) else emptyList())
+    fun logCalc(title: String, args: List<String>, snap: Mol) {
+        val e = "• " + title + " – xtb 6.7.1, GFN2-xTB, " + (if (solvent.isEmpty()) "phase gaz (pas de solvant ALPB)" else "solvant ALPB : " + solvent) +
+            ", charge 0, " + cores + " cœur(s) – commande : xtb mol.xyz " + args.joinToString(" ") + "\nxyz d'entrée :\n" + toXyz(snap)
+        calcLog = (calcLog + "\n\n" + e).takeLast(9000)
+    }
+    fun grab(out: String, k: String) = Regex("(?i)" + k + "\\s+(-?[0-9.]+)").findAll(out).lastOrNull()?.groupValues?.get(1) ?: "?"
+    fun failMsg(r: XR) = (if (r.code == 159) "xtb bloqué par Android – " else "") + "xtb : exit=" + r.code + " " + r.out.lines().filter { it.isNotBlank() }.takeLast(2).joinToString(" | ")
+
+    suspend fun optStep(label: String = "Optimisation"): XR? {
+        val snap = mol
+        busyMsg = t("Optimisation GFN2 en cours…", "GFN2 optimization running…"); progress = -1f; eta = ""
+        val args = xargs() + listOf("--opt")
+        val r = withContext(Dispatchers.IO) { xtbRun(ctx, args, toXyz(snap), emptyMap(), cores) }
+        val nm = File(r.dir, "xtbopt.xyz").takeIf { it.exists() }?.readText()?.let { fromXyz(snap, it) }
+        if (r.code != 0 || nm == null) { msg = failMsg(r); return null }
+        shape = false
+        commit(nm)
+        val q = parseCharges(r.out, r.dir, snap.atoms.size)
+        charges = q.first; qC = q.second
+        logCalc(label, args, snap)
+        return r
+    }
+
     fun xtbOpt() {
         if (running || mol.atoms.isEmpty()) return
         running = true
-        msg = t("xtb : optimisation GFN2 en cours…", "xtb: GFN2 optimization running…")
-        val snap = mol
         scope.launch {
-            val r = withContext(Dispatchers.IO) { xtbJob(ctx, listOf("--gfn", "2", "--opt"), toXyz(snap)) }
-            running = false
-            val nm = r.third?.let { fromXyz(snap, it) }
-            val e = Regex("TOTAL ENERGY\\s+(-?[0-9.]+)").find(r.second)?.groupValues?.get(1) ?: "?"
-            if (r.first == 0 && nm != null) {
-                shape = false
-                commit(nm)
-                msg = t("Optimisation xtb terminée (E = ", "xtb optimization done (E = ") + e + " Eh)"
-                calcLog = "Optimisation de géométrie – xtb 6.7.1, GFN2-xTB, phase gaz (pas de solvant ALPB), charge 0 – commande : xtb mol.xyz --gfn 2 --opt – énergie : " + e + " Eh\nxyz d'entrée :\n" + toXyz(snap)
-            } else msg = (if (r.first == 159) "xtb bloqué par Android (appel système interdit) – " else "") + "xtb : exit=" + r.first + " " + r.second.lines().filter { it.isNotBlank() }.takeLast(2).joinToString(" | ")
+            try {
+                val r = optStep() ?: return@launch
+                msg = t("Optimisation xtb terminée (E = ", "xtb optimization done (E = ") + grab(r.out, "TOTAL ENERGY") + " Eh)"
+            } finally { running = false }
         }
     }
+
+    fun xtbFreq() {
+        if (running || mol.atoms.isEmpty()) return
+        running = true
+        scope.launch {
+            try {
+                val snap = mol
+                busyMsg = t("Optimisation + fréquences en cours…", "Optimization + frequencies running…"); progress = -1f; eta = ""
+                val args = xargs() + listOf("--ohess")
+                val r = withContext(Dispatchers.IO) { xtbRun(ctx, args, toXyz(snap), emptyMap(), cores) }
+                val nm = File(r.dir, "xtbopt.xyz").takeIf { it.exists() }?.readText()?.let { fromXyz(snap, it) }
+                if (r.code != 0 || nm == null) { msg = failMsg(r); return@launch }
+                shape = false
+                commit(nm)
+                val g98 = File(r.dir, "g98.out").takeIf { it.exists() }?.readText()
+                var vb = if (g98 != null) parseG98(g98, snap.atoms.size) else emptyList()
+                if (vb.isEmpty()) vb = File(r.dir, "vibspectrum").takeIf { it.exists() }?.readText()?.let { parseVibspectrum(it) } ?: emptyList()
+                vibs = vb
+                val q = parseCharges(r.out, r.dir, snap.atoms.size)
+                charges = q.first; qC = q.second
+                val imag = vb.count { it.freq < -5f }
+                val e = grab(r.out, "TOTAL ENERGY"); val h = grab(r.out, "TOTAL ENTHALPY"); val g = grab(r.out, "TOTAL FREE ENERGY")
+                freqSummary = "E = " + e + " Eh | H = " + h + " Eh | G = " + g + " Eh (298,15 K) | " + t("fréquences imaginaires (< −5 cm⁻¹) : ", "imaginary frequencies (< −5 cm⁻¹): ") + imag
+                msg = "G = " + g + " Eh – " + t("fréq. imaginaires : ", "imaginary freq.: ") + imag
+                if (vb.isEmpty()) msg += t(" (liste des fréquences non lue)", " (frequency list not read)")
+                logCalc("Optimisation + fréquences", args, snap)
+                calcLog += "\n" + freqSummary
+            } finally { running = false }
+        }
+    }
+
+    fun selectOrb(o: Int) {
+        val md = molden ?: return
+        val homo = md.orbs.indexOfLast { it.occ > 0.5 }
+        orbSel = o; orbMesh = null
+        val sh = doubleArrayOf(
+            mol.atoms.map { it.x.toDouble() }.average() - md.atoms.map { it[0] }.average(),
+            mol.atoms.map { it.y.toDouble() }.average() - md.atoms.map { it[1] }.average(),
+            mol.atoms.map { it.z.toDouble() }.average() - md.atoms.map { it[2] }.average())
+        scope.launch { orbMesh = withContext(Dispatchers.Default) { buildMesh(md, homo + o, sh) } }
+    }
+
+    fun runOrb() {
+        if (running || mol.atoms.isEmpty()) return
+        running = true
+        scope.launch {
+            try {
+                optStep("Orbitales – optimisation") ?: return@launch
+                busyMsg = t("Orbitales : point simple…", "Orbitals: single point…"); progress = -1f; eta = ""
+                val snap = mol
+                val args = xargs() + listOf("--molden")
+                val r = withContext(Dispatchers.IO) { xtbRun(ctx, args, toXyz(snap), emptyMap(), cores) }
+                val txt = File(r.dir, "molden.input").takeIf { it.exists() }?.readText()
+                val md = if (txt != null) withContext(Dispatchers.Default) { parseMolden(txt) } else null
+                if (r.code != 0 || md == null) {
+                    msg = t("Orbitales : fichier molden illisible", "Orbitals: unreadable molden file") + " (exit " + r.code + ", " + (txt?.length ?: 0) + ")"
+                    return@launch
+                }
+                molden = md
+                logCalc("Orbitales – point simple (molden)", args, snap)
+                msg = t("Orbitales prêtes : choisissez HOMO / LUMO", "Orbitals ready: choose HOMO / LUMO")
+                selectOrb(0)
+            } finally { running = false }
+        }
+    }
+
+    fun runFukui() {
+        if (running || mol.atoms.isEmpty()) return
+        running = true
+        scope.launch {
+            try {
+                optStep("Fukui – optimisation (neutre)") ?: return@launch
+                val n = mol.atoms.size
+                val snap = mol
+                val xyz = toXyz(snap)
+                fun pick(q: Pair<List<Float>, List<Float>>) = if (chType == "CM5") q.second else q.first
+                val q0 = pick(Pair(charges, qC))
+                busyMsg = t("Fukui : point simple du cation (N−1)…", "Fukui: cation single point (N−1)…")
+                val a1 = xargs() + listOf("--chrg", "1", "--uhf", "1")
+                val ra = withContext(Dispatchers.IO) { xtbRun(ctx, a1, xyz, emptyMap(), cores) }
+                busyMsg = t("Fukui : point simple de l'anion (N+1)…", "Fukui: anion single point (N+1)…")
+                val a2 = xargs() + listOf("--chrg", "-1", "--uhf", "1")
+                val rb = withContext(Dispatchers.IO) { xtbRun(ctx, a2, xyz, emptyMap(), cores) }
+                if (ra.code != 0 || rb.code != 0) { msg = failMsg(if (ra.code != 0) ra else rb); return@launch }
+                val qa = pick(parseCharges(ra.out, ra.dir, n))
+                val qb = pick(parseCharges(rb.out, rb.dir, n))
+                if (q0.size == n && qa.size == n && qb.size == n) {
+                    fM = List(n) { qa[it] - q0[it] }
+                    fP = List(n) { q0[it] - qb[it] }
+                    fuMode = "both"
+                    logCalc("Fukui – point simple cation (N−1), charges " + chType, a1, snap)
+                    logCalc("Fukui – point simple anion (N+1), charges " + chType, a2, snap)
+                    msg = t("Fukui calculées (", "Fukui computed (") + chType + ")"
+                } else msg = t("Fukui : charges ", "Fukui: charges ") + chType + t(" indisponibles", " unavailable")
+            } finally { running = false }
+        }
+    }
+
+    fun runScan() {
+        val i = picked.getOrNull(0); val j = picked.getOrNull(1)
+        val d1 = scanEnd.replace(',', '.').toFloatOrNull()
+        val nImg = scanN.toIntOrNull()
+        if (running || i == null || j == null || d1 == null || nImg == null || nImg < 2) {
+            msg = t("Scan : vérifiez la distance finale et le nombre d'images", "Scan: check final distance and number of images"); return
+        }
+        running = true
+        scope.launch {
+            try {
+                optStep("Scan – optimisation initiale") ?: return@launch
+                val pa = mol.atoms[i]; val pb = mol.atoms[j]
+                val d0 = sqrt((pa.x - pb.x) * (pa.x - pb.x) + (pa.y - pb.y) * (pa.y - pb.y) + (pa.z - pb.z) * (pa.z - pb.z))
+                val inp = "\$opt\n  maxcycle=500\n\$constrain\n  force constant=1.0\n  distance: " + (i + 1) + ", " + (j + 1) + ", auto\n\$scan\n  1: " +
+                    String.format(java.util.Locale.US, "%.3f, %.3f, %d", d0, d1, nImg) + "\n\$end\n"
+                val snap = mol
+                val args = xargs() + listOf("--opt", "--input", "scan.inp")
+                busyMsg = t("Scan en cours…", "Scan running…"); progress = 0f; eta = t("Démarrage…", "Starting…")
+                val t0 = System.currentTimeMillis()
+                val r = withContext(Dispatchers.IO) {
+                    xtbRun(ctx, args, toXyz(snap), mapOf("scan.inp" to inp), cores) { dir ->
+                        val f = File(dir, "xtbscan.log")
+                        if (f.exists()) {
+                            val k = f.readLines().count { it.contains("energy:") }
+                            progress = (k.toFloat() / nImg).coerceIn(0f, 1f)
+                            val el = (System.currentTimeMillis() - t0) / 1000f
+                            if (k > 0) eta = t("Temps restant estimé : ", "Estimated time left: ") + fmtTime(el / k * (nImg - k)) + "  (" + k + "/" + nImg + ")"
+                        }
+                    }
+                }
+                val ps = parseScan(File(r.dir, "xtbscan.log").takeIf { it.exists() }?.readLines() ?: emptyList(), snap.atoms.size)
+                if (ps.first.isEmpty()) { msg = failMsg(r); return@launch }
+                scanFrames = ps.first; scanE = ps.second; scanIdx = 0; scanPlay = false
+                scanD = Pair(frameDist(ps.first.first(), i, j), frameDist(ps.first.last(), i, j))
+                logCalc("Scan 1D (atomes " + (i + 1) + "–" + (j + 1) + ", " + ps.first.size + " images)", args, snap)
+                calcLog += "\nFichier d'entrée scan.inp :\n" + inp
+                msg = t("Scan terminé : ", "Scan done: ") + ps.first.size + t(" images", " images")
+            } finally { running = false }
+        }
+    }
+
+    fun runFree() {
+        if (running || mol.atoms.isEmpty()) return
+        running = true
+        scope.launch {
+            try {
+                busyMsg = t("Calcul libre en cours…", "Custom run in progress…"); progress = -1f; eta = ""
+                val a0 = freeArgs.trim().split(Regex("\\s+")).filter { it.isNotEmpty() }
+                val files = if (freeInp.isNotBlank()) mapOf("xc.inp" to freeInp) else emptyMap()
+                val args = if (freeInp.isNotBlank()) a0 + listOf("--input", "xc.inp") else a0
+                val snap = mol
+                val r = withContext(Dispatchers.IO) { xtbRun(ctx, args, toXyz(snap), files, cores) }
+                freeOut = "commande : xtb mol.xyz " + args.joinToString(" ") + "\ncœurs : " + cores + "\n\n--- xyz d'entrée ---\n" + toXyz(snap) +
+                    (if (freeInp.isNotBlank()) "\n--- fichier d'entrée ---\n" + freeInp else "") + "\n--- sortie xtb (exit " + r.code + ") ---\n" + r.out
+                freeOpt = File(r.dir, "xtbopt.xyz").takeIf { it.exists() }?.readText()?.let { fromXyz(snap, it) }
+                logCalc("Calcul libre", args, snap)
+            } finally { running = false }
+        }
+    }
+
     fun finishBond(sa: Int, p: Offset) {
         val a = hIdx(sa) ?: return
         val base = baseMol()
@@ -472,6 +755,7 @@ fun App() {
     }
     fun tapAt(p: Offset) {
         val h = hit(p)
+        if (react == "scan" && scanFrames.isEmpty()) { if (h != null) picked = (picked + h).takeLast(2); return }
         when (mode) {
             Mode.DRAW -> if (h != null) {
                 val a = hIdx(h) ?: return
@@ -519,6 +803,10 @@ fun App() {
                 t("Ajouter les H", "Add H") to { commit(addH(mol)) },
                 t("Retirer les H", "Remove H") to { commit(removeH(mol)) },
                 t("Optimiser (xtb GFN2)", "Optimize (xtb GFN2)") to { xtbOpt() },
+                t("Optimiser + fréquences (xtb)", "Optimize + frequencies (xtb)") to { xtbFreq() },
+                t("Liste des fréquences", "Frequency list") to { if (vibs.isEmpty()) msg = t("Pas encore de fréquences : lance « Optimiser + fréquences »", "No frequencies yet: run « Optimize + frequencies »") else dialog = "freq" },
+                t("Charges (Mulliken) on/off", "Charges (Mulliken) on/off") to { showCh = !showCh },
+                t("Mode libre (xtb)", "Free mode (xtb)") to { dialog = "free" },
                 "Focus" to { focus() },
                 t("Estimer pKa", "Estimate pKa") to { msg = t("pKa : étape suivante", "pKa: next step") }
             ))
@@ -527,9 +815,26 @@ fun App() {
                 colors = SwitchDefaults.colors(
                     checkedThumbColor = Color.White, checkedTrackColor = Color(0xFF2ECC71),
                     uncheckedThumbColor = Color.White, uncheckedTrackColor = Color(0xFF777777), uncheckedBorderColor = Color(0xFF777777)))
-            Menu(t("Paramètres", "Settings"), listOf("Français" to { fr = true }, "English" to { fr = false }))
+            Menu(t("Paramètres", "Settings"), listOf(
+                "Français" to { fr = true }, "English" to { fr = false },
+                t("Solvant : aucun (gaz)", "Solvent: none (gas)") to { solvent = ""; msg = t("Phase gaz", "Gas phase") },
+                t("Solvant ALPB : eau", "ALPB solvent: water") to { solvent = "water"; msg = "ALPB : water" },
+                "ALPB : ethanol" to { solvent = "ethanol"; msg = "ALPB : ethanol" },
+                "ALPB : dmso" to { solvent = "dmso"; msg = "ALPB : dmso" },
+                "ALPB : chloroform" to { solvent = "chloroform"; msg = "ALPB : chloroform" },
+                "ALPB : acetonitrile" to { solvent = "acetonitrile"; msg = "ALPB : acetonitrile" },
+                "ALPB : toluene" to { solvent = "toluene"; msg = "ALPB : toluene" },
+                t("Cœurs xtb : 1", "xtb cores: 1") to { cores = 1 },
+                t("Cœurs xtb : 2 (expérimental)", "xtb cores: 2 (experimental)") to { cores = 2 },
+                t("Cœurs xtb : 4 (expérimental)", "xtb cores: 4 (experimental)") to { cores = 4 }
+            ))
             TextButton(onClick = { dialog = "info" }) { Text("Info") }
-            TextButton(onClick = { msg = t("Réactivité : avec xtb, prochaine étape", "Reactivity: with xtb, next step") }) { Text(t("Réactivité", "Reactivity")) }
+            Menu(t("Réactivité", "Reactivity"), listOf(
+                t("Charges partielles", "Partial charges") to { react = "charges" },
+                t("Orbitales frontières", "Frontier orbitals") to { react = "orb" },
+                t("Fonctions de Fukui", "Fukui functions") to { react = "fukui" },
+                "Scan" to { react = "scan"; picked = emptyList() }
+            ))
         }
         Row(Modifier.horizontalScroll(rememberScrollState())) {
             listOf(
@@ -587,7 +892,17 @@ fun App() {
                     else if (!multi && mode == Mode.DRAW && sa != null) finishBond(sa, cur)
                 }
             }) {
-                val pr = mol.atoms.map { rot(it) }
+                val vm = vibs.getOrNull(vibSel)
+                val sf = if (react == "scan") scanFrames.getOrNull(scanIdx) else null
+                val vat = if (sf != null && sf.size == 3 * mol.atoms.size) {
+                    mol.atoms.mapIndexed { i, a -> a.copy(x = sf[3 * i], y = sf[3 * i + 1], z = sf[3 * i + 2]) }
+                } else if (vm != null && vm.d.size == 3 * mol.atoms.size) {
+                    val sv = 0.45f * sin(vphase)
+                    mol.atoms.mapIndexed { i, a -> a.copy(x = a.x + sv * vm.d[3 * i], y = a.y + sv * vm.d[3 * i + 1], z = a.z + sv * vm.d[3 * i + 2]) }
+                } else mol.atoms
+                val pr = vat.map { rot(it) }
+                val bondsV = if (sf != null && sf.size == 3 * mol.atoms.size) dynBonds(vat, mol.bonds) else mol.bonds
+                val qShow = if (chType == "CM5" && qC.size == mol.atoms.size) qC else charges
                 fun scr(i: Int) = Offset(pr[i].first * U * scale + (off.x + cs.width / 2f), pr[i].second * U * scale + (off.y + cs.height / 2f))
                 fun cyl(c: Color, a: Offset, b: Offset, w: Float) {
                     drawLine(lerp(c, Color.Black, 0.45f), a, b, strokeWidth = w, cap = StrokeCap.Round)
@@ -595,7 +910,7 @@ fun App() {
                     drawLine(lerp(c, Color.White, 0.6f), a, b, strokeWidth = w * 0.25f, cap = StrokeCap.Round)
                 }
                 val items = mutableListOf<Pair<Float, () -> Unit>>()
-                mol.bonds.forEach { bd ->
+                bondsV.forEach { bd ->
                     if (bd.a < pr.size && bd.b < pr.size) {
                         val sa = scr(bd.a); val sb = scr(bd.b); val mid = (sa + sb) / 2f
                         val dir = sb - sa; val len = dir.getDistance() + 1e-3f
@@ -623,9 +938,43 @@ fun App() {
                             val paint = Paint().apply { textSize = r; textAlign = Paint.Align.CENTER; color = android.graphics.Color.BLACK; isFakeBoldText = true }
                             drawContext.canvas.nativeCanvas.drawText(a.el, s.x, s.y + r * 0.35f, paint)
                         }
+                        if (showCh && qShow.size == mol.atoms.size) {
+                            val p2 = Paint().apply { textSize = 26f; textAlign = Paint.Align.CENTER; color = if (qShow[i] < 0) 0xFFFF8A80.toInt() else 0xFF80D8FF.toInt(); isFakeBoldText = true }
+                            drawContext.canvas.nativeCanvas.drawText(String.format("%+.2f", qShow[i]), s.x, s.y - r - 6f, p2)
+                        }
+                        if (fuMode.isNotEmpty() && fP.size == mol.atoms.size && fM.size == mol.atoms.size) {
+                            val p3 = Paint().apply { textSize = 24f; textAlign = Paint.Align.CENTER; color = 0xFFFFD180.toInt(); isFakeBoldText = true }
+                            var yy = s.y + r + 22f
+                            if (fuMode == "f-" || fuMode == "both") { drawContext.canvas.nativeCanvas.drawText(String.format("f− %.2f", fM[i]), s.x, yy, p3); yy += 26f }
+                            if (fuMode == "f+" || fuMode == "both") drawContext.canvas.nativeCanvas.drawText(String.format("f+ %.2f", fP[i]), s.x, yy, p3)
+                        }
                     })
                 }
                 items.sortedBy { it.first }.forEach { it.second() }
+                val om = orbMesh
+                if (om != null && orbSel != 99) {
+                    val ycs = cos(yaw); val ysn = sin(yaw); val pcs = cos(pitch); val psn = sin(pitch)
+                    val ox = off.x + cs.width / 2f; val oy = off.y + cs.height / 2f; val kk = U * scale
+                    fun lobe(arr: FloatArray, cf: Color, cb: Color) {
+                        val pf = Path(); val pbk = Path()
+                        val xs = FloatArray(3); val ys = FloatArray(3)
+                        var q = 0
+                        while (q + 8 < arr.size) {
+                            for (v in 0 until 3) {
+                                val ax = arr[q + 3 * v] - pv.first; val ay = arr[q + 3 * v + 1] - pv.second; val az = arr[q + 3 * v + 2] - pv.third
+                                val x1 = ax * ycs + az * ysn; val z1 = -ax * ysn + az * ycs
+                                xs[v] = x1 * kk + ox; ys[v] = (ay * pcs - z1 * psn) * kk + oy
+                            }
+                            val area = (xs[1] - xs[0]) * (ys[2] - ys[0]) - (ys[1] - ys[0]) * (xs[2] - xs[0])
+                            val pth = if (area > 0f) pf else pbk
+                            pth.moveTo(xs[0], ys[0]); pth.lineTo(xs[1], ys[1]); pth.lineTo(xs[2], ys[2]); pth.close()
+                            q += 9
+                        }
+                        drawPath(pbk, cb); drawPath(pf, cf)
+                    }
+                    lobe(om.pos, Color(0xAA5C9DFF), Color(0x883F6FD0))
+                    lobe(om.neg, Color(0xAAFF6B6B), Color(0x88C04040))
+                }
                 val df = dragFrom
                 if (df != null && df < pr.size) drawLine(Color(0xFF00B0FF), scr(df), dragPos, strokeWidth = 6f, cap = StrokeCap.Round)
             }
@@ -643,6 +992,86 @@ fun App() {
             val d = sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z))
             t("Distance : ", "Distance: ") + String.format("%.2f Å", d)
         } else ""
+        if (react.isNotEmpty()) Column(Modifier.fillMaxWidth().background(Color(0xFF1B2229)).padding(8.dp).heightIn(max = 290.dp).verticalScroll(rememberScrollState())) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(when (react) { "charges" -> t("Charges partielles", "Partial charges"); "orb" -> t("Orbitales frontières", "Frontier orbitals"); "fukui" -> t("Fonctions de Fukui", "Fukui functions"); else -> "Scan" },
+                    color = Color.White, fontSize = 15.sp, modifier = Modifier.weight(1f))
+                TextButton(onClick = { react = ""; picked = emptyList(); scanPlay = false }) { Text(t("Fermer", "Close")) }
+            }
+            when (react) {
+                "charges" -> {
+                    FlowRow {
+                        FilterChip(selected = chType == "Mulliken", onClick = { chType = "Mulliken" }, label = { Text("Mulliken") }, modifier = Modifier.padding(2.dp))
+                        FilterChip(selected = chType == "CM5", onClick = { chType = "CM5" }, label = { Text(t("CM5 (type Hirshfeld)", "CM5 (Hirshfeld-type)")) }, modifier = Modifier.padding(2.dp))
+                        FilterChip(selected = showCh, onClick = { showCh = !showCh }, label = { Text(t("Afficher", "Show")) }, modifier = Modifier.padding(2.dp))
+                    }
+                    Button(onClick = { xtbOpt() }) { Text(t("Calculer (optimisation + charges)", "Compute (optimization + charges)")) }
+                    Text(t("xtb fournit les charges de Mulliken et CM5. Löwdin et Hirshfeld ne sont pas disponibles : CM5, dérivée de Hirshfeld, les remplace.", "xtb provides Mulliken and CM5 charges. Löwdin and Hirshfeld are not available: CM5, derived from Hirshfeld, replaces them."), fontSize = 11.sp, color = Color.Gray)
+                }
+                "orb" -> {
+                    Button(onClick = { runOrb() }) { Text(t("Calculer les orbitales (optimisation + point simple)", "Compute orbitals (optimization + single point)")) }
+                    val md = molden
+                    if (md != null) {
+                        val homo = md.orbs.indexOfLast { it.occ > 0.5 }
+                        FlowRow {
+                            listOf(-2 to "HOMO−2", -1 to "HOMO−1", 0 to "HOMO", 1 to "LUMO", 2 to "LUMO+1", 3 to "LUMO+2").forEach { (o, nm) ->
+                                val kk = homo + o
+                                if (kk in md.orbs.indices) FilterChip(selected = orbSel == o, onClick = { selectOrb(o) },
+                                    label = { Text(nm + "  " + String.format("%.2f eV", md.orbs[kk].ene * 27.2114)) }, modifier = Modifier.padding(2.dp))
+                            }
+                            FilterChip(selected = orbSel == 99, onClick = { orbSel = 99; orbMesh = null }, label = { Text(t("Masquer", "Hide")) }, modifier = Modifier.padding(2.dp))
+                        }
+                        Text(t("Bleu : phase +, rouge : phase −", "Blue: phase +, red: phase −"), fontSize = 11.sp, color = Color.Gray)
+                    }
+                }
+                "fukui" -> {
+                    FlowRow {
+                        listOf("f-" to "f−", "f+" to "f+", "both" to t("les deux", "both"), "" to t("aucun", "none")).forEach { (k2, nm) ->
+                            FilterChip(selected = fuMode == k2, onClick = { fuMode = k2 }, label = { Text(nm) }, modifier = Modifier.padding(2.dp))
+                        }
+                        FilterChip(selected = chType == "Mulliken", onClick = { chType = "Mulliken" }, label = { Text("Mulliken") }, modifier = Modifier.padding(2.dp))
+                        FilterChip(selected = chType == "CM5", onClick = { chType = "CM5" }, label = { Text("CM5") }, modifier = Modifier.padding(2.dp))
+                    }
+                    Button(onClick = { runFukui() }) { Text(t("Calculer (optimisation + 2 points simples)", "Compute (optimization + 2 single points)")) }
+                    Text(t("f− = q(N−1) − q(N) ; f+ = q(N) − q(N+1), avec les charges choisies.", "f− = q(N−1) − q(N); f+ = q(N) − q(N+1), with the selected charges."), fontSize = 11.sp, color = Color.Gray)
+                }
+                else -> {
+                    if (scanFrames.isEmpty()) {
+                        if (picked.size < 2) {
+                            Text(t("Sélectionnez deux atomes qui réagiront (touchez-les dans la molécule)", "Select the two atoms that will react (tap them in the molecule)"), color = Color.White, fontSize = 13.sp)
+                        } else {
+                            val a = mol.atoms[picked[0]]; val b = mol.atoms[picked[1]]
+                            val d0 = sqrt((a.x - b.x) * (a.x - b.x) + (a.y - b.y) * (a.y - b.y) + (a.z - b.z) * (a.z - b.z))
+                            Text(t("Distance actuelle : ", "Current distance: ") + String.format("%.3f Å", d0), color = Color.White, fontSize = 13.sp)
+                            Row {
+                                OutlinedTextField(value = scanEnd, onValueChange = { scanEnd = it }, label = { Text(t("Distance finale (Å)", "Final distance (Å)")) }, singleLine = true, modifier = Modifier.weight(1f).padding(end = 4.dp))
+                                OutlinedTextField(value = scanN, onValueChange = { scanN = it }, label = { Text("Images") }, singleLine = true, modifier = Modifier.weight(0.6f))
+                            }
+                            FlowRow { listOf(1, 2, 4).forEach { c -> FilterChip(selected = cores == c, onClick = { cores = c }, label = { Text(t("Cœurs : ", "Cores: ") + c) }, modifier = Modifier.padding(2.dp)) } }
+                            Button(onClick = { runScan() }) { Text(t("Lancer le scan", "Run scan")) }
+                        }
+                        if (picked.isNotEmpty()) TextButton(onClick = { picked = emptyList() }) { Text(t("Annuler la sélection", "Clear selection")) }
+                    } else {
+                        val nF = scanFrames.size
+                        ScanPlot(scanE, scanD.first, scanD.second, scanIdx, Modifier.fillMaxWidth().height(150.dp))
+                        val rel = (scanE[scanIdx.coerceIn(0, nF - 1)] - scanE[0]) * 2625.499638
+                        val dNow = if (picked.size >= 2) frameDist(scanFrames[scanIdx.coerceIn(0, nF - 1)], picked[0], picked[1]) else 0f
+                        Text(String.format("%d/%d – d = %.3f Å – ΔE = %.1f kJ/mol", scanIdx + 1, nF, dNow, rel), color = Color.White, fontSize = 13.sp)
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            TextButton(onClick = { scanPlay = !scanPlay }) { Text(if (scanPlay) "⏸" else "▶", fontSize = 22.sp) }
+                            Slider(value = scanIdx.toFloat(), onValueChange = { scanIdx = it.roundToInt().coerceIn(0, nF - 1); scanPlay = false },
+                                valueRange = 0f..(nF - 1).toFloat().coerceAtLeast(1f), modifier = Modifier.weight(1f))
+                        }
+                        TextButton(onClick = { scanFrames = emptyList(); scanPlay = false; picked = emptyList() }) { Text(t("Nouveau scan", "New scan")) }
+                    }
+                }
+            }
+        }
+        if (vibSel >= 0 && vibSel < vibs.size) Row(Modifier.padding(horizontal = 10.dp), verticalAlignment = Alignment.CenterVertically) {
+            Text(String.format("Mode %d : %.1f cm⁻¹ (%.1f km/mol)", vibSel + 1, vibs[vibSel].freq, vibs[vibSel].ir), color = Color.White, fontSize = 13.sp)
+            TextButton(onClick = { vibSel = -1 }) { Text(t("Arrêter", "Stop")) }
+            TextButton(onClick = { dialog = "freq" }) { Text(t("Liste", "List")) }
+        }
         Text(
             if (dist.isNotEmpty()) dist else if (msg.isNotEmpty()) msg else
                 t("Élément : $el – touchez pour poser, glissez depuis un atome pour lier", "Element: $el – tap to place, drag from an atom to bond"),
@@ -650,6 +1079,53 @@ fun App() {
         )
     }
 
+    if (running) {
+        AlertDialog(onDismissRequest = {}, confirmButton = { TextButton(onClick = { curProc?.destroy() }) { Text(t("Annuler", "Cancel")) } },
+            title = { Text(t("Calcul en cours", "Calculation running")) },
+            text = {
+                Column {
+                    Text(busyMsg)
+                    Spacer(Modifier.height(10.dp))
+                    if (progress >= 0f) {
+                        LinearProgressIndicator(progress = { progress }, modifier = Modifier.fillMaxWidth())
+                        Text(String.format("%.0f %%", progress * 100), fontSize = 12.sp)
+                    } else LinearProgressIndicator(modifier = Modifier.fillMaxWidth())
+                    if (eta.isNotEmpty()) Text(eta, fontSize = 12.sp)
+                }
+            })
+    }
+    if (dialog == "free") {
+        AlertDialog(onDismissRequest = { dialog = "" }, confirmButton = { TextButton(onClick = { dialog = "" }) { Text(t("Fermer", "Close")) } },
+            title = { Text(t("Mode libre xtb", "Free xtb mode")) },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    OutlinedTextField(value = freeArgs, onValueChange = { freeArgs = it }, label = { Text(t("Mots-clés xtb", "xtb keywords")) }, modifier = Modifier.fillMaxWidth())
+                    OutlinedTextField(value = freeInp, onValueChange = { freeInp = it }, label = { Text(t("Fichier d'entrée xcontrol (optionnel)", "xcontrol input file (optional)")) }, modifier = Modifier.fillMaxWidth().heightIn(min = 90.dp))
+                    Row {
+                        Button(onClick = { runFree() }) { Text(t("Lancer", "Run")) }
+                        Spacer(Modifier.width(8.dp))
+                        Button(onClick = { msg = saveTxt(ctx, "adylase_xtb_" + System.currentTimeMillis() / 1000 + ".txt", freeOut) }, enabled = freeOut.isNotEmpty()) { Text(t("Télécharger .txt", "Download .txt")) }
+                    }
+                    freeOpt?.let { o -> TextButton(onClick = { commit(o); dialog = "" }) { Text(t("Appliquer la géométrie optimisée", "Apply optimized geometry")) } }
+                    if (freeOut.isNotEmpty()) Text(freeOut.takeLast(6000), fontSize = 9.sp)
+                }
+            })
+    }
+    if (dialog == "freq") {
+        AlertDialog(onDismissRequest = { dialog = "" }, confirmButton = { TextButton(onClick = { dialog = "" }) { Text("OK") } },
+            title = { Text(t("Fréquences", "Frequencies")) },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text(freqSummary, fontSize = 12.sp)
+                    Text(t("Touchez une ligne pour voir la vibration.", "Tap a line to see the vibration."), fontSize = 11.sp, color = Color.Gray)
+                    vibs.forEachIndexed { k, v ->
+                        Text(String.format("%d   %.1f cm⁻¹   %.1f km/mol", k + 1, v.freq, v.ir), fontSize = 14.sp,
+                            color = if (v.freq < -5f) Color(0xFFFF8A80) else Color.White,
+                            modifier = Modifier.fillMaxWidth().clickable { vibSel = k; dialog = "" }.padding(vertical = 6.dp))
+                    }
+                }
+            })
+    }
     if (dialog == "tab") PeriodicTable(el, { el = it; dialog = "" }, { dialog = "" })
     if (dialog == "hal") {
         AlertDialog(onDismissRequest = { dialog = "" }, confirmButton = {},
@@ -671,7 +1147,10 @@ fun App() {
                     Text(t("Application entièrement programmée par Claude (Anthropic), sur la demande de Lilian Rouillé.", "App entirely programmed by Claude (Anthropic), at the request of Lilian Rouillé."))
                     Spacer(Modifier.height(10.dp))
                     Text(t("Méthodes : xtb 6.7.1 (GFN2-xTB), calculs en phase gaz sauf mention contraire (le solvant ALPB est indiqué quand il est utilisé). Open Babel : à venir.", "Methods: xtb 6.7.1 (GFN2-xTB), gas phase unless stated (ALPB solvent shown when used). Open Babel: coming."))
+                    Spacer(Modifier.height(8.dp))
+                    Text(t("Références : GFN2-xTB – C. Bannwarth, S. Ehlert, S. Grimme, J. Chem. Theory Comput. 2019, 15, 1652. Programme xtb – C. Bannwarth et al., WIREs Comput. Mol. Sci. 2021, 11, e1493. ALPB – S. Ehlert et al., J. Chem. Theory Comput. 2021, 17, 4250. CM5 – A. V. Marenich et al., J. Chem. Theory Comput. 2012, 8, 527.", "References: GFN2-xTB – C. Bannwarth, S. Ehlert, S. Grimme, J. Chem. Theory Comput. 2019, 15, 1652. xtb program – C. Bannwarth et al., WIREs Comput. Mol. Sci. 2021, 11, e1493. ALPB – S. Ehlert et al., J. Chem. Theory Comput. 2021, 17, 4250. CM5 – A. V. Marenich et al., J. Chem. Theory Comput. 2012, 8, 527."), fontSize = 10.sp)
                     if (calcLog.isNotEmpty()) { Spacer(Modifier.height(8.dp)); Text(calcLog, fontSize = 10.sp) }
+                    Button(onClick = { msg = saveTxt(ctx, "adylase_rapport_" + System.currentTimeMillis() / 1000 + ".txt", "Adylase – Lilian Rouillé\n\n" + calcLog + "\n\nxyz actuel :\n" + toXyz(mol)) }) { Text(t("Télécharger le rapport (.txt)", "Download report (.txt)")) }
                     Spacer(Modifier.height(8.dp))
                     Text(t("xyz actuel", "Current xyz"))
                     Text(toXyz(mol), fontSize = 10.sp)
