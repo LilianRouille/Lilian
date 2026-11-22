@@ -32,6 +32,7 @@ import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.IntSize
 import androidx.compose.ui.layout.onSizeChanged
 import androidx.compose.ui.graphics.Path
+import androidx.compose.ui.draw.scale
 import kotlin.math.roundToInt
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -195,7 +196,7 @@ fun relax(m: Mol, iters: Int = 1): Mol {
 }
 
 fun toXyz(m: Mol): String = m.atoms.size.toString() + "\n\n" +
-    m.atoms.joinToString("\n") { String.format(java.util.Locale.US, "%s %.6f %.6f %.6f", it.el, it.x, it.y, it.z) } + "\n"
+    m.atoms.joinToString("\n") { String.format(java.util.Locale.US, "%s %.6f %.6f %.6f", it.el, it.x, -it.y, it.z) } + "\n"
 
 fun fromXyz(m: Mol, s: String): Mol? {
     val l = s.lines().drop(2).filter { it.isNotBlank() }
@@ -203,7 +204,7 @@ fun fromXyz(m: Mol, s: String): Mol? {
     return try {
         m.copy(atoms = m.atoms.mapIndexed { i, a ->
             val q = l[i].trim().split(Regex("\\s+"))
-            a.copy(x = q[1].toFloat(), y = q[2].toFloat(), z = q[3].toFloat())
+            a.copy(x = q[1].toFloat(), y = -q[2].toFloat(), z = q[3].toFloat())
         })
     } catch (e: Exception) { null }
 }
@@ -254,7 +255,7 @@ fun parseG98(t: String, n: Int): List<Vib> {
             for (a in 0 until n) {
                 val row = lines.getOrNull(j + 1 + a) ?: break
                 val v = fl.findAll(row).map { it.value.toFloat() }.toList()
-                for (k in fr.indices) for (c in 0 until 3) d[k][3 * a + c] = v.getOrElse(3 * k + c) { 0f }
+                for (k in fr.indices) for (c in 0 until 3) d[k][3 * a + c] = (if (c == 1) -1f else 1f) * v.getOrElse(3 * k + c) { 0f }
             }
             for (k in fr.indices) {
                 val dd = d[k]
@@ -369,28 +370,35 @@ fun diag(ctx: android.content.Context): String {
 }
 
 @Composable
-fun ScanPlot(e: List<Double>, d0: Float, d1: Float, idx: Int, modifier: Modifier) {
+fun ScanPlot(e: List<Double>, d0: Float, d1: Float, tt: Float, modifier: Modifier) {
     val rel = e.map { (it - e[0]) * 2625.499638 }
     Canvas(modifier) {
         val w = size.width; val h = size.height
         val l = 100f; val b = 44f; val tp = 24f; val r = 24f
         val mn = minOf(0.0, rel.min()); val mx = maxOf(rel.max(), mn + 1e-3)
+        val span = mx - mn
+        val step = if (span <= 600.0) 50.0 else if (span <= 1500.0) 100.0 else 250.0
         fun px(i: Int) = l + (w - l - r) * (if (rel.size > 1) i.toFloat() / (rel.size - 1) else 0f)
         fun py(v: Double) = (h - b - (h - b - tp) * ((v - mn) / (mx - mn))).toFloat()
+        val pt = Paint().apply { color = android.graphics.Color.LTGRAY; textSize = 26f }
+        val nc = drawContext.canvas.nativeCanvas
+        var tv = Math.ceil(mn / step) * step
+        while (tv <= mx + 1e-6) {
+            val yy = py(tv)
+            drawLine(if (tv == 0.0) Color(0x66FFFFFF) else Color(0x28FFFFFF), Offset(l, yy), Offset(w - r, yy), if (tv == 0.0) 2f else 1f)
+            nc.drawText(String.format("%.0f", tv), 6f, yy + 9f, pt)
+            tv += step
+        }
         drawLine(Color.Gray, Offset(l, tp), Offset(l, h - b), 2f)
         drawLine(Color.Gray, Offset(l, h - b), Offset(w - r, h - b), 2f)
-        if (mn < 0.0 && mx > 0.0) drawLine(Color(0x55FFFFFF), Offset(l, py(0.0)), Offset(w - r, py(0.0)), 1f)
         for (i in 1 until rel.size) drawLine(Color(0xFF4FC3F7), Offset(px(i - 1), py(rel[i - 1])), Offset(px(i), py(rel[i])), 4f)
         rel.forEachIndexed { i, v -> drawCircle(Color(0xFF4FC3F7), 5f, Offset(px(i), py(v))) }
-        if (idx in rel.indices) {
-            drawLine(Color(0x88FFD54F), Offset(px(idx), tp), Offset(px(idx), h - b), 2f)
-            drawCircle(Color(0xFFFFD54F), 11f, Offset(px(idx), py(rel[idx])))
-        }
-        val pt = Paint().apply { color = android.graphics.Color.LTGRAY; textSize = 28f }
-        val nc = drawContext.canvas.nativeCanvas
-        nc.drawText(String.format("%.1f", mx), 4f, tp + 10f, pt)
-        nc.drawText(String.format("%.1f", mn), 4f, h - b, pt)
-        nc.drawText("kJ/mol", 4f, tp + 42f, pt)
+        val i0 = tt.toInt().coerceIn(0, rel.size - 1); val i1 = minOf(i0 + 1, rel.size - 1); val fr = tt - i0
+        val mxp = px(i0) + (px(i1) - px(i0)) * fr
+        val myp = py(rel[i0]) + (py(rel[i1]) - py(rel[i0])) * fr
+        drawLine(Color(0x88FFD54F), Offset(mxp, tp), Offset(mxp, h - b), 2f)
+        drawCircle(Color(0xFFFFD54F), 11f, Offset(mxp, myp))
+        nc.drawText("kJ/mol", l + 8f, tp + 22f, pt)
         nc.drawText(String.format("%.2f Å", d0), l, h - 10f, pt)
         nc.drawText(String.format("%.2f Å", d1), w - r - 120f, h - 10f, pt)
     }
@@ -495,13 +503,19 @@ fun App() {
     var freeInp by remember { mutableStateOf("") }
     var freeOut by remember { mutableStateOf("") }
     var freeOpt by remember { mutableStateOf<Mol?>(null) }
+    var charge by remember { mutableStateOf(0) }
+    var scanT by remember { mutableStateOf(0f) }
+    var fuLobes by remember { mutableStateOf(true) }
+    var fuMeshM by remember { mutableStateOf<Mesh?>(null) }
+    var fuMeshP by remember { mutableStateOf<Mesh?>(null) }
+    val vpaint = remember { Paint() }
 
-    LaunchedEffect(scanPlay) { while (scanPlay && scanFrames.size > 1) { scanIdx = (scanIdx + 1) % scanFrames.size; delay(130) } }
+    LaunchedEffect(scanPlay) { while (scanPlay && scanFrames.size > 1) { scanT += 0.07f; if (scanT >= scanFrames.size - 1) scanT = 0f; delay(33) } }
     LaunchedEffect(vibSel) { while (vibSel >= 0) { vphase += 0.15f; delay(33) } }
     LaunchedEffect(shape) { while (shape) { mol = relax(mol, 6); delay(33) } }
 
     fun t(f: String, e: String) = if (fr) f else e
-    fun commit(m: Mol) { undo.add(mol); redo.clear(); mol = m; vibs = emptyList(); vibSel = -1; charges = emptyList(); qC = emptyList(); fP = emptyList(); fM = emptyList(); molden = null; orbSel = 99; orbMesh = null; scanFrames = emptyList(); scanPlay = false }
+    fun commit(m: Mol) { undo.add(mol); redo.clear(); mol = m; vibs = emptyList(); vibSel = -1; charges = emptyList(); qC = emptyList(); fP = emptyList(); fM = emptyList(); molden = null; orbSel = 99; orbMesh = null; fuMeshM = null; fuMeshP = null; scanFrames = emptyList(); scanPlay = false }
     fun fin(m: Mol): Mol = if (autoH) addH(m) else m
     fun rot(a: Atom): V {
         val cy = cos(yaw); val sy = sin(yaw); val cp = cos(pitch); val sp = sin(pitch)
@@ -542,10 +556,18 @@ fun App() {
         if (cs.width > 0) scale = (minOf(cs.width, cs.height) / 2f / (U * r)).coerceIn(0.4f, 6f)
     }
     fun example(m: Mol) { val n = relax(addH(m), 300); commit(n); picked = emptyList(); focus(n) }
-    fun xargs(): List<String> = listOf("--gfn", "2") + (if (solvent.isNotEmpty()) listOf("--alpb", solvent) else emptyList())
+    fun xargs(dc: Int = 0): List<String> {
+        val tot = charge + dc
+        val known = mol.atoms.all { zOf(it.el) > 0 }
+        val ne = mol.atoms.sumOf { zOf(it.el) } - tot
+        return listOf("--gfn", "2") + (if (solvent.isNotEmpty()) listOf("--alpb", solvent) else emptyList()) +
+            (if (tot != 0) listOf("--chrg", tot.toString()) else emptyList()) + (if (known && ne % 2 != 0) listOf("--uhf", "1") else emptyList())
+    }
+    fun toast(s: String) { android.widget.Toast.makeText(ctx, s, android.widget.Toast.LENGTH_LONG).show() }
+    fun saveToast(name: String, text: String) { msg = saveTxt(ctx, name, text); toast(msg) }
     fun logCalc(title: String, args: List<String>, snap: Mol) {
         val e = "• " + title + " – xtb 6.7.1, GFN2-xTB, " + (if (solvent.isEmpty()) "phase gaz (pas de solvant ALPB)" else "solvant ALPB : " + solvent) +
-            ", charge 0, " + cores + " cœur(s) – commande : xtb mol.xyz " + args.joinToString(" ") + "\nxyz d'entrée :\n" + toXyz(snap)
+            ", charge " + charge + ", " + cores + " cœur(s) – commande : xtb mol.xyz " + args.joinToString(" ") + "\nxyz d'entrée :\n" + toXyz(snap)
         calcLog = (calcLog + "\n\n" + e).takeLast(9000)
     }
     fun grab(out: String, k: String) = Regex("(?i)" + k + "\\s+(-?[0-9.]+)").findAll(out).lastOrNull()?.groupValues?.get(1) ?: "?"
@@ -607,15 +629,20 @@ fun App() {
         }
     }
 
+    fun molShift(md: MolDen) = doubleArrayOf(
+        mol.atoms.map { it.x.toDouble() }.average() - md.atoms.map { it[0] }.average(),
+        -mol.atoms.map { it.y.toDouble() }.average() - md.atoms.map { it[1] }.average(),
+        mol.atoms.map { it.z.toDouble() }.average() - md.atoms.map { it[2] }.average())
+
     fun selectOrb(o: Int) {
         val md = molden ?: return
         val homo = md.orbs.indexOfLast { it.occ > 0.5 }
         orbSel = o; orbMesh = null
-        val sh = doubleArrayOf(
-            mol.atoms.map { it.x.toDouble() }.average() - md.atoms.map { it[0] }.average(),
-            mol.atoms.map { it.y.toDouble() }.average() - md.atoms.map { it[1] }.average(),
-            mol.atoms.map { it.z.toDouble() }.average() - md.atoms.map { it[2] }.average())
-        scope.launch { orbMesh = withContext(Dispatchers.Default) { buildMesh(md, homo + o, sh) } }
+        val sh = molShift(md)
+        scope.launch {
+            running = true; busyMsg = t("Surface de l'orbitale…", "Building the orbital surface…"); progress = -1f; eta = ""
+            try { orbMesh = withContext(Dispatchers.Default) { buildMesh(md, homo + o, sh) } } finally { running = false }
+        }
     }
 
     fun runOrb() {
@@ -653,23 +680,39 @@ fun App() {
                 val xyz = toXyz(snap)
                 fun pick(q: Pair<List<Float>, List<Float>>) = if (chType == "CM5") q.second else q.first
                 val q0 = pick(Pair(charges, qC))
-                busyMsg = t("Fukui : point simple du cation (N−1)…", "Fukui: cation single point (N−1)…")
-                val a1 = xargs() + listOf("--chrg", "1", "--uhf", "1")
+                busyMsg = t("Fukui : point simple du cation (N−1)…", "Fukui: cation single point (N−1)…"); progress = -1f; eta = ""
+                val a1 = xargs(1)
                 val ra = withContext(Dispatchers.IO) { xtbRun(ctx, a1, xyz, emptyMap(), cores) }
-                busyMsg = t("Fukui : point simple de l'anion (N+1)…", "Fukui: anion single point (N+1)…")
-                val a2 = xargs() + listOf("--chrg", "-1", "--uhf", "1")
-                val rb = withContext(Dispatchers.IO) { xtbRun(ctx, a2, xyz, emptyMap(), cores) }
-                if (ra.code != 0 || rb.code != 0) { msg = failMsg(if (ra.code != 0) ra else rb); return@launch }
+                if (ra.code != 0) { msg = failMsg(ra); return@launch }
                 val qa = pick(parseCharges(ra.out, ra.dir, n))
+                busyMsg = t("Fukui : point simple de l'anion (N+1)…", "Fukui: anion single point (N+1)…")
+                val a2 = xargs(-1)
+                val rb = withContext(Dispatchers.IO) { xtbRun(ctx, a2, xyz, emptyMap(), cores) }
+                if (rb.code != 0) { msg = failMsg(rb); return@launch }
                 val qb = pick(parseCharges(rb.out, rb.dir, n))
-                if (q0.size == n && qa.size == n && qb.size == n) {
-                    fM = List(n) { qa[it] - q0[it] }
-                    fP = List(n) { q0[it] - qb[it] }
-                    fuMode = "both"
-                    logCalc("Fukui – point simple cation (N−1), charges " + chType, a1, snap)
-                    logCalc("Fukui – point simple anion (N+1), charges " + chType, a2, snap)
-                    msg = t("Fukui calculées (", "Fukui computed (") + chType + ")"
-                } else msg = t("Fukui : charges ", "Fukui: charges ") + chType + t(" indisponibles", " unavailable")
+                if (q0.size != n || qa.size != n || qb.size != n) {
+                    msg = t("Fukui : charges ", "Fukui: charges ") + chType + t(" indisponibles", " unavailable"); return@launch
+                }
+                fM = List(n) { qa[it] - q0[it] }
+                fP = List(n) { q0[it] - qb[it] }
+                fuMode = "both"
+                logCalc("Fukui – point simple cation (N−1), charges " + chType, a1, snap)
+                logCalc("Fukui – point simple anion (N+1), charges " + chType, a2, snap)
+                busyMsg = t("Fukui : orbitales frontières (lobes)…", "Fukui: frontier orbitals (lobes)…")
+                val a3 = xargs() + listOf("--molden")
+                val rc = withContext(Dispatchers.IO) { xtbRun(ctx, a3, xyz, emptyMap(), cores) }
+                val txt = File(rc.dir, "molden.input").takeIf { it.exists() }?.readText()
+                val md = if (rc.code == 0 && txt != null) withContext(Dispatchers.Default) { parseMolden(txt) } else null
+                if (md != null) {
+                    val homo = md.orbs.indexOfLast { it.occ > 0.5 }
+                    val sh = molShift(md)
+                    withContext(Dispatchers.Default) {
+                        fuMeshM = buildMesh(md, homo, sh, true, 0xFF39B54A.toInt(), 0)
+                        fuMeshP = buildMesh(md, homo + 1, sh, true, 0xFFFF9800.toInt(), 0)
+                    }
+                    logCalc("Fukui – lobes (HOMO² ≈ f−, LUMO² ≈ f+)", a3, snap)
+                }
+                msg = t("Fukui calculées (", "Fukui computed (") + chType + ")"
             } finally { running = false }
         }
     }
@@ -706,7 +749,7 @@ fun App() {
                 }
                 val ps = parseScan(File(r.dir, "xtbscan.log").takeIf { it.exists() }?.readLines() ?: emptyList(), snap.atoms.size)
                 if (ps.first.isEmpty()) { msg = failMsg(r); return@launch }
-                scanFrames = ps.first; scanE = ps.second; scanIdx = 0; scanPlay = false
+                scanFrames = ps.first; scanE = ps.second; scanT = 0f; scanPlay = false
                 scanD = Pair(frameDist(ps.first.first(), i, j), frameDist(ps.first.last(), i, j))
                 logCalc("Scan 1D (atomes " + (i + 1) + "–" + (j + 1) + ", " + ps.first.size + " images)", args, snap)
                 calcLog += "\nFichier d'entrée scan.inp :\n" + inp
@@ -755,6 +798,19 @@ fun App() {
     }
     fun tapAt(p: Offset) {
         val h = hit(p)
+        run {
+            val gcx = 72f; val gcy = cs.height - 72f
+            val cyw = cos(yaw); val syw = sin(yaw); val cpt = cos(pitch); val spt = sin(pitch)
+            val ax3 = listOf(Triple(1f, 0f, 0f), Triple(0f, -1f, 0f), Triple(0f, 0f, 1f))
+            val half = (PI / 2).toFloat()
+            val tg = listOf(Pair(half, -half), Pair(0f, 0f), Pair(0f, half))
+            for (ai in 0 until 3) {
+                val e = ax3[ai]
+                val x1 = e.first * cyw + e.third * syw; val z1 = -e.first * syw + e.third * cyw
+                val y1 = e.second * cpt - z1 * spt
+                if ((Offset(gcx + x1 * 46f, gcy + y1 * 46f) - p).getDistance() < 32f) { yaw = tg[ai].first; pitch = tg[ai].second; return }
+            }
+        }
         if (react == "scan" && scanFrames.isEmpty()) { if (h != null) picked = (picked + h).takeLast(2); return }
         when (mode) {
             Mode.DRAW -> if (h != null) {
@@ -795,6 +851,7 @@ fun App() {
                     example(Mol((0..5).map { Atom("C", 1.4f * cos(it * k), 1.4f * sin(it * k)) }, (0..5).map { Bond(it, (it + 1) % 6, if (it % 2 == 0) 2 else 1) }))
                 },
                 t("Exemple : eau", "Example: water") to { example(Mol(listOf(Atom("O", 0f, 0f, 0f)))) },
+                t("Exemple : CAT", "Example: CAT") to { val m = perceive(parseXyzAtoms(catXyz)); commit(m); picked = emptyList(); focus(m) },
                 t("Exemple : éthanol", "Example: ethanol") to {
                     example(Mol(listOf(Atom("C", 0f, 0f), Atom("C", 1.52f, 0f), Atom("O", 2.2f, 1.2f)), listOf(Bond(0, 1), Bond(1, 2))))
                 }
@@ -810,11 +867,6 @@ fun App() {
                 "Focus" to { focus() },
                 t("Estimer pKa", "Estimate pKa") to { msg = t("pKa : étape suivante", "pKa: next step") }
             ))
-            Text("Shaping", color = Color.White, modifier = Modifier.padding(start = 8.dp, end = 6.dp))
-            Switch(checked = shape, onCheckedChange = { shape = it; if (it) mol = relax(mol, 300) },
-                colors = SwitchDefaults.colors(
-                    checkedThumbColor = Color.White, checkedTrackColor = Color(0xFF2ECC71),
-                    uncheckedThumbColor = Color.White, uncheckedTrackColor = Color(0xFF777777), uncheckedBorderColor = Color(0xFF777777)))
             Menu(t("Paramètres", "Settings"), listOf(
                 "Français" to { fr = true }, "English" to { fr = false },
                 t("Solvant : aucun (gaz)", "Solvent: none (gas)") to { solvent = ""; msg = t("Phase gaz", "Gas phase") },
@@ -824,6 +876,10 @@ fun App() {
                 "ALPB : chloroform" to { solvent = "chloroform"; msg = "ALPB : chloroform" },
                 "ALPB : acetonitrile" to { solvent = "acetonitrile"; msg = "ALPB : acetonitrile" },
                 "ALPB : toluene" to { solvent = "toluene"; msg = "ALPB : toluene" },
+                t("Charge totale : −1", "Total charge: −1") to { charge = -1; msg = t("Charge totale −1", "Total charge −1") },
+                t("Charge totale : 0", "Total charge: 0") to { charge = 0; msg = t("Charge totale 0", "Total charge 0") },
+                t("Charge totale : +1", "Total charge: +1") to { charge = 1; msg = t("Charge totale +1", "Total charge +1") },
+                t("Charge totale : +2", "Total charge: +2") to { charge = 2; msg = t("Charge totale +2", "Total charge +2") },
                 t("Cœurs xtb : 1", "xtb cores: 1") to { cores = 1 },
                 t("Cœurs xtb : 2 (expérimental)", "xtb cores: 2 (experimental)") to { cores = 2 },
                 t("Cœurs xtb : 4 (expérimental)", "xtb cores: 4 (experimental)") to { cores = 4 }
@@ -893,7 +949,11 @@ fun App() {
                 }
             }) {
                 val vm = vibs.getOrNull(vibSel)
-                val sf = if (react == "scan") scanFrames.getOrNull(scanIdx) else null
+                val sf = if (react == "scan" && scanFrames.isNotEmpty()) {
+                    val i0 = scanT.toInt().coerceIn(0, scanFrames.size - 1); val i1 = minOf(i0 + 1, scanFrames.size - 1); val fr = scanT - i0
+                    val a0 = scanFrames[i0]; val a1 = scanFrames[i1]
+                    FloatArray(a0.size) { a0[it] + (a1[it] - a0[it]) * fr }
+                } else null
                 val vat = if (sf != null && sf.size == 3 * mol.atoms.size) {
                     mol.atoms.mapIndexed { i, a -> a.copy(x = sf[3 * i], y = sf[3 * i + 1], z = sf[3 * i + 2]) }
                 } else if (vm != null && vm.d.size == 3 * mol.atoms.size) {
@@ -951,40 +1011,53 @@ fun App() {
                     })
                 }
                 items.sortedBy { it.first }.forEach { it.second() }
+                val meshes = ArrayList<Mesh>()
                 val om = orbMesh
-                if (om != null && orbSel != 99) {
-                    val ycs = cos(yaw); val ysn = sin(yaw); val pcs = cos(pitch); val psn = sin(pitch)
-                    val ox = off.x + cs.width / 2f; val oy = off.y + cs.height / 2f; val kk = U * scale
-                    fun lobe(arr: FloatArray, cf: Color, cb: Color) {
-                        val pf = Path(); val pbk = Path()
-                        val xs = FloatArray(3); val ys = FloatArray(3)
-                        var q = 0
-                        while (q + 8 < arr.size) {
-                            for (v in 0 until 3) {
-                                val ax = arr[q + 3 * v] - pv.first; val ay = arr[q + 3 * v + 1] - pv.second; val az = arr[q + 3 * v + 2] - pv.third
-                                val x1 = ax * ycs + az * ysn; val z1 = -ax * ysn + az * ycs
-                                xs[v] = x1 * kk + ox; ys[v] = (ay * pcs - z1 * psn) * kk + oy
-                            }
-                            val area = (xs[1] - xs[0]) * (ys[2] - ys[0]) - (ys[1] - ys[0]) * (xs[2] - xs[0])
-                            val pth = if (area > 0f) pf else pbk
-                            pth.moveTo(xs[0], ys[0]); pth.lineTo(xs[1], ys[1]); pth.lineTo(xs[2], ys[2]); pth.close()
-                            q += 9
-                        }
-                        drawPath(pbk, cb); drawPath(pf, cf)
+                if (om != null && orbSel != 99) meshes.add(om)
+                if (fuLobes && fuMode.isNotEmpty()) {
+                    if (fuMode == "f-" || fuMode == "both") fuMeshM?.let { meshes.add(it) }
+                    if (fuMode == "f+" || fuMode == "both") fuMeshP?.let { meshes.add(it) }
+                }
+                if (meshes.isNotEmpty() && android.os.Build.VERSION.SDK_INT >= 29) {
+                    val nc = drawContext.canvas.nativeCanvas
+                    val sc = nc.saveLayerAlpha(0f, 0f, size.width, size.height, 135)
+                    val mox = off.x + cs.width / 2f; val moy = off.y + cs.height / 2f
+                    for (m in meshes) renderMesh(m, nc, vpaint, yaw, pitch, pv, mox, moy, U * scale)
+                    nc.restoreToCount(sc)
+                }
+                run {
+                    val gcx = 72f; val gcy = size.height - 72f
+                    val gy = cos(yaw); val gys = sin(yaw); val gp = cos(pitch); val gps = sin(pitch)
+                    val axs = listOf(Triple(1f, 0f, 0f), Triple(0f, -1f, 0f), Triple(0f, 0f, 1f))
+                    val acol = listOf(Color(0xFFE53935), Color(0xFF43A047), Color(0xFF1E88E5))
+                    val albl = listOf("X", "Y", "Z")
+                    val aproj = axs.map { e ->
+                        val x1 = e.first * gy + e.third * gys; val z1 = -e.first * gys + e.third * gy
+                        Triple(x1, e.second * gp - z1 * gps, e.second * gps + z1 * gp)
                     }
-                    lobe(om.pos, Color(0xAA5C9DFF), Color(0x883F6FD0))
-                    lobe(om.neg, Color(0xAAFF6B6B), Color(0x88C04040))
+                    for (ai in aproj.indices.sortedBy { aproj[it].third }) {
+                        val q3 = aproj[ai]; val ex = gcx + q3.first * 46f; val ey = gcy + q3.second * 46f
+                        drawLine(acol[ai], Offset(gcx, gcy), Offset(ex, ey), 6f, StrokeCap.Round)
+                        drawCircle(acol[ai], 15f, Offset(ex, ey))
+                        val pa = Paint().apply { textSize = 22f; textAlign = Paint.Align.CENTER; color = android.graphics.Color.WHITE; isFakeBoldText = true }
+                        drawContext.canvas.nativeCanvas.drawText(albl[ai], ex, ey + 8f, pa)
+                    }
                 }
                 val df = dragFrom
                 if (df != null && df < pr.size) drawLine(Color(0xFF00B0FF), scr(df), dragPos, strokeWidth = 6f, cap = StrokeCap.Round)
             }
-            Column(Modifier.padding(4.dp)) {
+            Column(Modifier.verticalScroll(rememberScrollState()).padding(4.dp)) {
                 FilledTonalButton(onClick = { if (undo.isNotEmpty()) { redo.add(mol); mol = undo.removeLast() } },
                     modifier = Modifier.width(64.dp), contentPadding = PaddingValues(0.dp)) { Text("↶") }
                 FilledTonalButton(onClick = { if (redo.isNotEmpty()) { undo.add(mol); mol = redo.removeLast() } },
                     modifier = Modifier.width(64.dp), contentPadding = PaddingValues(0.dp)) { Text("↷") }
                 FilledTonalButton(onClick = { focus() },
                     modifier = Modifier.width(64.dp), contentPadding = PaddingValues(0.dp)) { Text("Focus") }
+                Text("Shaping", color = Color.White, fontSize = 10.sp, modifier = Modifier.padding(top = 8.dp))
+                Switch(checked = shape, onCheckedChange = { shape = it; if (it) mol = relax(mol, 300) }, modifier = Modifier.scale(0.7f),
+                    colors = SwitchDefaults.colors(
+                        checkedThumbColor = Color.White, checkedTrackColor = Color(0xFF2ECC71),
+                        uncheckedThumbColor = Color.White, uncheckedTrackColor = Color(0xFF777777), uncheckedBorderColor = Color(0xFF777777)))
             }
         }
         val dist = if (mode == Mode.MEASURE && picked.size == 2 && picked.all { it < mol.atoms.size }) {
@@ -1031,9 +1104,10 @@ fun App() {
                         }
                         FilterChip(selected = chType == "Mulliken", onClick = { chType = "Mulliken" }, label = { Text("Mulliken") }, modifier = Modifier.padding(2.dp))
                         FilterChip(selected = chType == "CM5", onClick = { chType = "CM5" }, label = { Text("CM5") }, modifier = Modifier.padding(2.dp))
+                        FilterChip(selected = fuLobes, onClick = { fuLobes = !fuLobes }, label = { Text(t("Lobes 3D", "3D lobes")) }, modifier = Modifier.padding(2.dp))
                     }
                     Button(onClick = { runFukui() }) { Text(t("Calculer (optimisation + 2 points simples)", "Compute (optimization + 2 single points)")) }
-                    Text(t("f− = q(N−1) − q(N) ; f+ = q(N) − q(N+1), avec les charges choisies.", "f− = q(N−1) − q(N); f+ = q(N) − q(N+1), with the selected charges."), fontSize = 11.sp, color = Color.Gray)
+                    Text(t("Valeurs par atome : f− = q(N−1) − q(N) ; f+ = q(N) − q(N+1). Lobes 3D (vert f−, orange f+) : approximation par orbitales frontières, f− ≈ HOMO², f+ ≈ LUMO².", "Per-atom values: f− = q(N−1) − q(N); f+ = q(N) − q(N+1). 3D lobes (green f−, orange f+): frontier-orbital approximation, f− ≈ HOMO², f+ ≈ LUMO²."), fontSize = 11.sp, color = Color.Gray)
                 }
                 else -> {
                     if (scanFrames.isEmpty()) {
@@ -1053,13 +1127,14 @@ fun App() {
                         if (picked.isNotEmpty()) TextButton(onClick = { picked = emptyList() }) { Text(t("Annuler la sélection", "Clear selection")) }
                     } else {
                         val nF = scanFrames.size
-                        ScanPlot(scanE, scanD.first, scanD.second, scanIdx, Modifier.fillMaxWidth().height(150.dp))
-                        val rel = (scanE[scanIdx.coerceIn(0, nF - 1)] - scanE[0]) * 2625.499638
-                        val dNow = if (picked.size >= 2) frameDist(scanFrames[scanIdx.coerceIn(0, nF - 1)], picked[0], picked[1]) else 0f
-                        Text(String.format("%d/%d – d = %.3f Å – ΔE = %.1f kJ/mol", scanIdx + 1, nF, dNow, rel), color = Color.White, fontSize = 13.sp)
+                        ScanPlot(scanE, scanD.first, scanD.second, scanT, Modifier.fillMaxWidth().height(150.dp))
+                        val i0 = scanT.toInt().coerceIn(0, nF - 1); val i1 = minOf(i0 + 1, nF - 1); val fr = scanT - i0
+                        val rel = ((scanE[i0] + (scanE[i1] - scanE[i0]) * fr) - scanE[0]) * 2625.499638
+                        val dNow = if (picked.size >= 2) frameDist(scanFrames[i0], picked[0], picked[1]) * (1f - fr) + frameDist(scanFrames[i1], picked[0], picked[1]) * fr else 0f
+                        Text(String.format("%.1f/%d – d = %.3f Å – ΔE = %.1f kJ/mol", scanT + 1f, nF, dNow, rel), color = Color.White, fontSize = 13.sp)
                         Row(verticalAlignment = Alignment.CenterVertically) {
                             TextButton(onClick = { scanPlay = !scanPlay }) { Text(if (scanPlay) "⏸" else "▶", fontSize = 22.sp) }
-                            Slider(value = scanIdx.toFloat(), onValueChange = { scanIdx = it.roundToInt().coerceIn(0, nF - 1); scanPlay = false },
+                            Slider(value = scanT.coerceIn(0f, (nF - 1).toFloat()), onValueChange = { scanT = it; scanPlay = false },
                                 valueRange = 0f..(nF - 1).toFloat().coerceAtLeast(1f), modifier = Modifier.weight(1f))
                         }
                         TextButton(onClick = { scanFrames = emptyList(); scanPlay = false; picked = emptyList() }) { Text(t("Nouveau scan", "New scan")) }
@@ -1104,7 +1179,7 @@ fun App() {
                     Row {
                         Button(onClick = { runFree() }) { Text(t("Lancer", "Run")) }
                         Spacer(Modifier.width(8.dp))
-                        Button(onClick = { msg = saveTxt(ctx, "adylase_xtb_" + System.currentTimeMillis() / 1000 + ".txt", freeOut) }, enabled = freeOut.isNotEmpty()) { Text(t("Télécharger .txt", "Download .txt")) }
+                        Button(onClick = { saveToast("adylase_xtb_" + System.currentTimeMillis() / 1000 + ".txt", freeOut) }, enabled = freeOut.isNotEmpty()) { Text(t("Télécharger .txt", "Download .txt")) }
                     }
                     freeOpt?.let { o -> TextButton(onClick = { commit(o); dialog = "" }) { Text(t("Appliquer la géométrie optimisée", "Apply optimized geometry")) } }
                     if (freeOut.isNotEmpty()) Text(freeOut.takeLast(6000), fontSize = 9.sp)
@@ -1150,7 +1225,7 @@ fun App() {
                     Spacer(Modifier.height(8.dp))
                     Text(t("Références : GFN2-xTB – C. Bannwarth, S. Ehlert, S. Grimme, J. Chem. Theory Comput. 2019, 15, 1652. Programme xtb – C. Bannwarth et al., WIREs Comput. Mol. Sci. 2021, 11, e1493. ALPB – S. Ehlert et al., J. Chem. Theory Comput. 2021, 17, 4250. CM5 – A. V. Marenich et al., J. Chem. Theory Comput. 2012, 8, 527.", "References: GFN2-xTB – C. Bannwarth, S. Ehlert, S. Grimme, J. Chem. Theory Comput. 2019, 15, 1652. xtb program – C. Bannwarth et al., WIREs Comput. Mol. Sci. 2021, 11, e1493. ALPB – S. Ehlert et al., J. Chem. Theory Comput. 2021, 17, 4250. CM5 – A. V. Marenich et al., J. Chem. Theory Comput. 2012, 8, 527."), fontSize = 10.sp)
                     if (calcLog.isNotEmpty()) { Spacer(Modifier.height(8.dp)); Text(calcLog, fontSize = 10.sp) }
-                    Button(onClick = { msg = saveTxt(ctx, "adylase_rapport_" + System.currentTimeMillis() / 1000 + ".txt", "Adylase – Lilian Rouillé\n\n" + calcLog + "\n\nxyz actuel :\n" + toXyz(mol)) }) { Text(t("Télécharger le rapport (.txt)", "Download report (.txt)")) }
+                    Button(onClick = { saveToast("adylase_rapport_" + System.currentTimeMillis() / 1000 + ".txt", "Adylase – Lilian Rouillé\n\n" + calcLog + "\n\nxyz actuel :\n" + toXyz(mol)) }) { Text(t("Télécharger le rapport (.txt)", "Download report (.txt)")) }
                     Spacer(Modifier.height(8.dp))
                     Text(t("xyz actuel", "Current xyz"))
                     Text(toXyz(mol), fontSize = 10.sp)

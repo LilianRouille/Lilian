@@ -80,7 +80,86 @@ fun saveTxt(ctx: Context, name: String, text: String): String {
 class Ao(val cx: Double, val cy: Double, val cz: Double, val l: Int, val m: Int, val cart: Boolean, val al: DoubleArray, val co: DoubleArray)
 class Orb(val ene: Double, val occ: Double, val c: DoubleArray)
 class MolDen(val aos: List<Ao>, val orbs: List<Orb>, val atoms: List<DoubleArray>)
-class Mesh(val pos: FloatArray, val neg: FloatArray)
+class Mesh(val p: FloatArray, val n: FloatArray, val col: IntArray) {
+    val nt = col.size
+    val sx = FloatArray(nt * 3); val sy = FloatArray(nt * 3); val sz = FloatArray(nt * 3); val sh = FloatArray(nt * 3)
+    val zc = FloatArray(nt)
+    val verts = FloatArray(nt * 6); val colors = IntArray(nt * 3)
+    val key = IntArray(nt); val order = IntArray(nt); val cnts = IntArray(1025)
+}
+
+class Surf(val p: FloatArray, val n: FloatArray)
+
+val zTable = mapOf("H" to 1, "Li" to 3, "Be" to 4, "B" to 5, "C" to 6, "N" to 7, "O" to 8, "F" to 9, "Na" to 11, "Mg" to 12, "Al" to 13,
+    "Si" to 14, "P" to 15, "S" to 16, "Cl" to 17, "K" to 19, "Ca" to 20, "Sc" to 21, "Ti" to 22, "V" to 23, "Cr" to 24, "Mn" to 25,
+    "Fe" to 26, "Co" to 27, "Ni" to 28, "Cu" to 29, "Zn" to 30, "Ga" to 31, "Ge" to 32, "As" to 33, "Se" to 34, "Br" to 35, "I" to 53)
+
+fun zOf(el: String): Int = zTable[el] ?: 0
+
+fun parseXyzAtoms(s: String): List<Atom> = s.lines().mapNotNull { l ->
+    val p = l.trim().split(Regex("\\s+"))
+    if (p.size >= 4 && p[1].toFloatOrNull() != null) Atom(p[0], p[1].toFloat(), -p[2].toFloat(), p[3].toFloat()) else null
+}
+
+fun perceive(atoms: List<Atom>): Mol {
+    val bo = ArrayList<Bond>()
+    for (i in atoms.indices) for (j in i + 1 until atoms.size) {
+        val dx = atoms[i].x - atoms[j].x; val dy = atoms[i].y - atoms[j].y; val dz = atoms[i].z - atoms[j].z
+        if (sqrt(dx * dx + dy * dy + dz * dz) < 1.25f * bl(atoms[i].el, atoms[j].el)) bo.add(Bond(i, j, 1))
+    }
+    val ord = IntArray(atoms.size)
+    for (b in bo) { ord[b.a] += 1; ord[b.b] += 1 }
+    repeat(3) {
+        for (k in bo.indices) {
+            val b = bo[k]
+            val ta = tgt[atoms[b.a].el]; val tb = tgt[atoms[b.b].el]
+            if (ta != null && tb != null && ord[b.a] < ta && ord[b.b] < tb && b.o < 3) {
+                bo[k] = b.copy(o = b.o + 1); ord[b.a]++; ord[b.b]++
+            }
+        }
+    }
+    return Mol(atoms, bo)
+}
+
+fun renderMesh(m: Mesh, c: android.graphics.Canvas, paint: android.graphics.Paint, yaw: Float, pitch: Float, pv: Triple<Float, Float, Float>, ox: Float, oy: Float, k: Float) {
+    val cy = kotlin.math.cos(yaw); val sy = kotlin.math.sin(yaw); val cp = kotlin.math.cos(pitch); val sp = kotlin.math.sin(pitch)
+    val nv = m.nt * 3
+    if (nv == 0) return
+    for (v in 0 until nv) {
+        val ax = m.p[3 * v] - pv.first; val ay = m.p[3 * v + 1] - pv.second; val az = m.p[3 * v + 2] - pv.third
+        val x1 = ax * cy + az * sy; val z1 = -ax * sy + az * cy
+        m.sx[v] = x1 * k + ox; m.sy[v] = (ay * cp - z1 * sp) * k + oy; m.sz[v] = ay * sp + z1 * cp
+        val bx = m.n[3 * v]; val by = m.n[3 * v + 1]; val bz = m.n[3 * v + 2]
+        val nx1 = bx * cy + bz * sy; val nz1 = -bx * sy + bz * cy
+        val ny2 = by * cp - nz1 * sp; val nz2 = by * sp + nz1 * cp
+        val sgn = if (nz2 < 0f) -1f else 1f
+        val d = sgn * (-0.35f * nx1 - 0.45f * ny2 + 0.82f * nz2)
+        m.sh[v] = 0.38f + 0.62f * maxOf(0f, d)
+    }
+    var zmin = Float.MAX_VALUE; var zmax = -Float.MAX_VALUE
+    for (t in 0 until m.nt) {
+        val z = (m.sz[3 * t] + m.sz[3 * t + 1] + m.sz[3 * t + 2]) / 3f
+        m.zc[t] = z
+        if (z < zmin) zmin = z
+        if (z > zmax) zmax = z
+    }
+    val span = zmax - zmin + 1e-6f
+    java.util.Arrays.fill(m.cnts, 0)
+    for (t in 0 until m.nt) { val b = ((m.zc[t] - zmin) / span * 1023f).toInt(); m.key[t] = b; m.cnts[b + 1]++ }
+    for (b in 0 until 1024) m.cnts[b + 1] += m.cnts[b]
+    for (t in 0 until m.nt) { m.order[m.cnts[m.key[t]]++] = t }
+    for (q in 0 until m.nt) {
+        val t = m.order[q]; val cc = m.col[t]
+        val r = (cc shr 16) and 255; val g = (cc shr 8) and 255; val bb = cc and 255
+        for (e in 0 until 3) {
+            val v = 3 * t + e
+            m.verts[6 * q + 2 * e] = m.sx[v]; m.verts[6 * q + 2 * e + 1] = m.sy[v]
+            val s2 = m.sh[v]
+            m.colors[3 * q + e] = (255 shl 24) or ((r * s2).toInt().coerceAtMost(255) shl 16) or ((g * s2).toInt().coerceAtMost(255) shl 8) or (bb * s2).toInt().coerceAtMost(255)
+        }
+    }
+    c.drawVertices(android.graphics.Canvas.VertexMode.TRIANGLES, nv * 2, m.verts, 0, null, 0, m.colors, 0, null, 0, 0, paint)
+}
 
 fun gam(l: Int): Double = when (l) { 0 -> 0.886226925; 1 -> 1.329340388; 2 -> 3.323350970; else -> 11.63172840 }
 
@@ -183,7 +262,7 @@ fun parseMolden0(t: String): MolDen? {
 fun aoVal(a: Ao, x: Double, y: Double, z: Double): Double {
     val dx = x - a.cx; val dy = y - a.cy; val dz = z - a.cz
     val r2 = dx * dx + dy * dy + dz * dz
-    if (r2 > 400.0) return 0.0
+    if (r2 > 150.0) return 0.0
     var rad = 0.0
     for (i in a.al.indices) rad += a.co[i] * exp(-a.al[i] * r2)
     val ang = when (a.l) {
@@ -196,34 +275,56 @@ fun aoVal(a: Ao, x: Double, y: Double, z: Double): Double {
     return rad * ang
 }
 
-fun surf(v: FloatArray, nx: Int, ny: Int, nz: Int, org: DoubleArray, h: Double, iso: Float, sg: Float, sh: DoubleArray): FloatArray {
-    var buf = FloatArray(1 shl 15)
+fun surf(v: FloatArray, nx: Int, ny: Int, nz: Int, org: DoubleArray, h: Double, iso: Float, sg: Float, sh: DoubleArray): Surf {
+    var pb = FloatArray(1 shl 15)
+    var nb = FloatArray(1 shl 15)
     var cnt = 0
-    fun add(p: DoubleArray) {
-        if (cnt + 3 > buf.size) buf = buf.copyOf(buf.size * 2)
-        buf[cnt++] = p[0].toFloat(); buf[cnt++] = p[1].toFloat(); buf[cnt++] = p[2].toFloat()
+    fun add(q: DoubleArray) {
+        if (cnt + 3 > pb.size) { pb = pb.copyOf(pb.size * 2); nb = nb.copyOf(nb.size * 2) }
+        pb[cnt] = q[0].toFloat(); pb[cnt + 1] = q[1].toFloat(); pb[cnt + 2] = q[2].toFloat()
+        nb[cnt] = q[3].toFloat(); nb[cnt + 1] = q[4].toFloat(); nb[cnt + 2] = q[5].toFloat()
+        cnt += 3
+    }
+    fun gr(ix: Int, iy: Int, iz: Int, o: DoubleArray) {
+        val x0 = maxOf(ix - 1, 0); val x1 = minOf(ix + 1, nx - 1)
+        val y0 = maxOf(iy - 1, 0); val y1 = minOf(iy + 1, ny - 1)
+        val z0 = maxOf(iz - 1, 0); val z1 = minOf(iz + 1, nz - 1)
+        o[0] = (v[(x1 * ny + iy) * nz + iz] - v[(x0 * ny + iy) * nz + iz]).toDouble() / (x1 - x0)
+        o[1] = (v[(ix * ny + y1) * nz + iz] - v[(ix * ny + y0) * nz + iz]).toDouble() / (y1 - y0)
+        o[2] = (v[(ix * ny + iy) * nz + z1] - v[(ix * ny + iy) * nz + z0]).toDouble() / (z1 - z0)
     }
     val ox = intArrayOf(0, 1, 1, 0, 0, 1, 1, 0)
     val oy = intArrayOf(0, 0, 1, 1, 0, 0, 1, 1)
     val oz = intArrayOf(0, 0, 0, 0, 1, 1, 1, 1)
+    val cix = IntArray(8); val ciy = IntArray(8); val ciz = IntArray(8)
     val tet = arrayOf(intArrayOf(0, 5, 1, 6), intArrayOf(0, 1, 2, 6), intArrayOf(0, 2, 3, 6), intArrayOf(0, 3, 7, 6), intArrayOf(0, 7, 4, 6), intArrayOf(0, 4, 5, 6))
     val f = FloatArray(8)
     val pos = Array(8) { DoubleArray(3) }
+    val gi = DoubleArray(3); val gj = DoubleArray(3)
+    val sgd = sg.toDouble()
     fun edge(i: Int, j: Int): DoubleArray {
         val t = (f[i] / (f[i] - f[j])).toDouble()
-        return doubleArrayOf(pos[i][0] + t * (pos[j][0] - pos[i][0]) + sh[0], pos[i][1] + t * (pos[j][1] - pos[i][1]) + sh[1], pos[i][2] + t * (pos[j][2] - pos[i][2]) + sh[2])
+        gr(cix[i], ciy[i], ciz[i], gi); gr(cix[j], ciy[j], ciz[j], gj)
+        val a = -sgd * ((1 - t) * gi[0] + t * gj[0])
+        val b = -sgd * ((1 - t) * gi[1] + t * gj[1])
+        val d = -sgd * ((1 - t) * gi[2] + t * gj[2])
+        val l = sqrt(a * a + b * b + d * d) + 1e-12
+        return doubleArrayOf(
+            pos[i][0] + t * (pos[j][0] - pos[i][0]) + sh[0], pos[i][1] + t * (pos[j][1] - pos[i][1]) + sh[1], pos[i][2] + t * (pos[j][2] - pos[i][2]) + sh[2],
+            a / l, b / l, d / l)
     }
     for (ix in 0 until nx - 1) for (iy in 0 until ny - 1) for (iz in 0 until nz - 1) {
         var any = false; var all = true
-        for (c in 0 until 8) {
-            f[c] = sg * v[((ix + ox[c]) * ny + iy + oy[c]) * nz + iz + oz[c]] - iso
-            if (f[c] >= 0f) any = true else all = false
+        for (cc in 0 until 8) {
+            f[cc] = sg * v[((ix + ox[cc]) * ny + iy + oy[cc]) * nz + iz + oz[cc]] - iso
+            if (f[cc] >= 0f) any = true else all = false
         }
         if (!any || all) continue
-        for (c in 0 until 8) {
-            pos[c][0] = org[0] + (ix + ox[c]) * h
-            pos[c][1] = org[1] + (iy + oy[c]) * h
-            pos[c][2] = org[2] + (iz + oz[c]) * h
+        for (cc in 0 until 8) {
+            cix[cc] = ix + ox[cc]; ciy[cc] = iy + oy[cc]; ciz[cc] = iz + oz[cc]
+            pos[cc][0] = org[0] + cix[cc] * h
+            pos[cc][1] = org[1] + ciy[cc] * h
+            pos[cc][2] = org[2] + ciz[cc] * h
         }
         for (t4 in tet) {
             val ins = ArrayList<Int>(); val outs = ArrayList<Int>()
@@ -239,10 +340,10 @@ fun surf(v: FloatArray, nx: Int, ny: Int, nz: Int, org: DoubleArray, h: Double, 
             }
         }
     }
-    return buf.copyOf(cnt)
+    return Surf(pb.copyOf(cnt), nb.copyOf(cnt))
 }
 
-fun buildMesh(md: MolDen, oi: Int, sh: DoubleArray): Mesh? {
+fun buildMesh(md: MolDen, oi: Int, sh: DoubleArray, density: Boolean = false, c1: Int = 0xFF4A86F5.toInt(), c2: Int = 0xFFF05050.toInt()): Mesh? {
     val orb = md.orbs.getOrNull(oi) ?: return null
     val b = 0.52917721
     val mg = 3.5
@@ -250,26 +351,42 @@ fun buildMesh(md: MolDen, oi: Int, sh: DoubleArray): Mesh? {
     val y0 = md.atoms.minOf { it[1] } - mg; val y1 = md.atoms.maxOf { it[1] } + mg
     val z0 = md.atoms.minOf { it[2] } - mg; val z1 = md.atoms.maxOf { it[2] } + mg
     val vol = (x1 - x0) * (y1 - y0) * (z1 - z0)
-    val h = maxOf(0.25, Math.cbrt(vol / 70000.0))
+    val h = maxOf(0.3, Math.cbrt(vol / 60000.0))
     val nx = ((x1 - x0) / h).toInt() + 1
     val ny = ((y1 - y0) / h).toInt() + 1
     val nz = ((z1 - z0) / h).toInt() + 1
     val v = FloatArray(nx * ny * nz)
-    val used = md.aos.indices.filter { abs(orb.c[it]) > 1e-5 }
+    val used = md.aos.indices.filter { abs(orb.c[it]) > 1e-4 }
     var mx = 0f
     for (ix in 0 until nx) for (iy in 0 until ny) for (iz in 0 until nz) {
         val x = (x0 + ix * h) / b; val y = (y0 + iy * h) / b; val z = (z0 + iz * h) / b
         var s = 0.0
         for (a in used) s += orb.c[a] * aoVal(md.aos[a], x, y, z)
-        val f = s.toFloat()
+        var f = s.toFloat()
+        if (density) f *= f
         v[(ix * ny + iy) * nz + iz] = f
         if (abs(f) > mx) mx = abs(f)
     }
-    if (mx < 1e-6f) return null
-    val iso = minOf(0.03f, 0.4f * mx)
+    if (mx < 1e-9f) return null
+    val iso = if (density) 0.12f * mx else minOf(0.03f, 0.4f * mx)
     val org = doubleArrayOf(x0, y0, z0)
-    return Mesh(surf(v, nx, ny, nz, org, h, iso, 1f, sh), surf(v, nx, ny, nz, org, h, iso, -1f, sh))
+    val parts = ArrayList<Pair<Surf, Int>>()
+    parts.add(Pair(surf(v, nx, ny, nz, org, h, iso, 1f, sh), c1))
+    if (!density) parts.add(Pair(surf(v, nx, ny, nz, org, h, iso, -1f, sh), c2))
+    val total = parts.sumOf { it.first.p.size }
+    if (total == 0) return null
+    val p = FloatArray(total); val n = FloatArray(total); val col = IntArray(total / 9)
+    var o = 0; var ct = 0
+    for ((s, cc) in parts) {
+        s.p.copyInto(p, o); s.n.copyInto(n, o)
+        for (q in 0 until s.p.size / 9) col[ct++] = cc
+        o += s.p.size
+    }
+    var i = 1
+    while (i < total) { p[i] = -p[i]; n[i] = -n[i]; i += 3 }
+    return Mesh(p, n, col)
 }
+
 
 fun dynBonds(a: List<Atom>, ref: List<Bond>): List<Bond> {
     val out = ArrayList<Bond>()
@@ -305,7 +422,7 @@ fun parseScan(lines: List<String>, n: Int): Pair<List<FloatArray>, List<Double>>
         for (k in 0 until n) {
             val row = lines[i + 2 + k].trim().split(Regex("\\s+"))
             if (row.size < 4) { ok = false; break }
-            a[3 * k] = row[1].toFloat(); a[3 * k + 1] = row[2].toFloat(); a[3 * k + 2] = row[3].toFloat()
+            a[3 * k] = row[1].toFloat(); a[3 * k + 1] = -row[2].toFloat(); a[3 * k + 2] = row[3].toFloat()
         }
         if (!ok) break
         fr.add(a); en.add(e)
