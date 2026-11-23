@@ -909,6 +909,7 @@ fun App() {
             ))
             Menu(t("Paramètres", "Settings"), listOf(
                 "Français" to { fr = true }, "English" to { fr = false },
+                t("Réinitialiser : gaz, charge 0", "Reset: gas, charge 0") to { solvent = ""; charge = 0; msg = t("Phase gaz, charge totale 0", "Gas phase, total charge 0") },
                 t("Solvant : aucun (gaz)", "Solvent: none (gas)") to { solvent = ""; msg = t("Phase gaz", "Gas phase") },
                 t("Solvant ALPB : eau", "ALPB solvent: water") to { solvent = "water"; msg = "ALPB : water" },
                 "ALPB : ethanol" to { solvent = "ethanol"; msg = "ALPB : ethanol" },
@@ -1083,6 +1084,13 @@ fun App() {
                     colors = SwitchDefaults.colors(
                         checkedThumbColor = Color.White, checkedTrackColor = Color(0xFF2ECC71),
                         uncheckedThumbColor = Color.White, uncheckedTrackColor = Color(0xFF777777), uncheckedBorderColor = Color(0xFF777777)))
+                Column(Modifier.padding(top = 10.dp).width(64.dp).background(Color(0xFF1B2229)).clickable { dialog = "cond" }.padding(vertical = 5.dp),
+                    horizontalAlignment = Alignment.CenterHorizontally) {
+                    Text(t("Solvant", "Solvent"), color = Color.Gray, fontSize = 9.sp)
+                    Text(if (solvent.isEmpty()) t("gaz", "gas") else solvent, color = if (solvent.isEmpty()) Color.White else Color(0xFF4FC3F7), fontSize = 11.sp, maxLines = 1)
+                    Text("Charge", color = Color.Gray, fontSize = 9.sp, modifier = Modifier.padding(top = 4.dp))
+                    Text(if (charge > 0) "+" + charge else charge.toString(), color = if (charge != 0) Color(0xFFFFD54F) else Color.White, fontSize = 13.sp)
+                }
             }
         }
         val dist = if (mode == Mode.MEASURE && picked.size == 2 && picked.all { it < mol.atoms.size }) {
@@ -1214,6 +1222,35 @@ fun App() {
                     }
                     freeOpt?.let { o -> TextButton(onClick = { commit(o); dialog = "" }) { Text(t("Appliquer la géométrie optimisée", "Apply optimized geometry")) } }
                     if (freeOut.isNotEmpty()) Text(freeOut.takeLast(6000), fontSize = 9.sp)
+                }
+            })
+    }
+    if (dialog == "cond") {
+        AlertDialog(onDismissRequest = { dialog = "" }, confirmButton = { TextButton(onClick = { dialog = "" }) { Text("OK") } },
+            title = { Text(t("Conditions de calcul", "Calculation conditions")) },
+            text = {
+                Column(Modifier.verticalScroll(rememberScrollState())) {
+                    Text(t("Solvant (ALPB)", "Solvent (ALPB)"), fontSize = 13.sp)
+                    FlowRow {
+                        listOf("" to t("Gaz", "Gas"), "water" to "water", "ethanol" to "ethanol", "dmso" to "dmso", "chloroform" to "chloroform", "acetonitrile" to "acetonitrile", "toluene" to "toluene").forEach { (k, nm) ->
+                            FilterChip(selected = solvent == k, onClick = { solvent = k }, label = { Text(nm) }, modifier = Modifier.padding(2.dp))
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(t("Charge totale", "Total charge"), fontSize = 13.sp)
+                    FlowRow {
+                        listOf(-2, -1, 0, 1, 2).forEach { c ->
+                            FilterChip(selected = charge == c, onClick = { charge = c }, label = { Text(if (c > 0) "+" + c else c.toString()) }, modifier = Modifier.padding(2.dp))
+                        }
+                    }
+                    Spacer(Modifier.height(8.dp))
+                    Text(t("Cœurs xtb", "xtb cores"), fontSize = 13.sp)
+                    FlowRow {
+                        listOf(1, 2, 4).forEach { c ->
+                            FilterChip(selected = cores == c, onClick = { cores = c }, label = { Text(c.toString()) }, modifier = Modifier.padding(2.dp))
+                        }
+                    }
+                    TextButton(onClick = { solvent = ""; charge = 0 }) { Text(t("Réinitialiser (gaz, charge 0)", "Reset (gas, charge 0)")) }
                 }
             })
     }
